@@ -443,11 +443,16 @@ function Invoke-SystemChecks {
     Invoke-Check 'неустановленные обновления (поиск идёт до нескольких минут)' {
         if ($script:SkipUpdates) { Add-Finding -Level INFO -Title 'Поиск неустановленных обновлений пропущен (-SkipUpdates)'; return }
         if (-not $script:UpdCache) {
-            $session = New-Object -ComObject Microsoft.Update.Session
-            $res = $session.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0')
-            $list = @()
-            foreach ($u in $res.Updates) { $list += [pscustomobject]@{ Title = "$($u.Title)"; Type = [int]$u.Type } }
-            $script:UpdCache = @{ List = $list }
+            try {
+                $session = New-Object -ComObject Microsoft.Update.Session
+                $res = $session.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0')
+                $list = @()
+                foreach ($u in $res.Updates) { $list += [pscustomobject]@{ Title = "$($u.Title)"; Type = [int]$u.Type } }
+                $script:UpdCache = @{ List = $list }
+            } catch {
+                Add-Finding -Level INFO -Title 'Не удалось спросить Windows Update о неустановленных обновлениях (нет интернета или служба занята)' -Detail @("$($_.Exception.Message)")
+                return
+            }
         }
         $all = @($script:UpdCache.List | Where-Object { $_.Title -notmatch '(?i)Security Intelligence Update|KB2267602|механизма обнаружения|аналитики безопасности' })
         $soft = @($all | Where-Object { $_.Type -ne 2 })
@@ -1478,7 +1483,7 @@ function Invoke-AutorunChecks {
 }
 
 # ================================================================ 7. УЧЁТНЫЕ ЗАПИСИ И УДАЛЁННЫЙ ДОСТУП
-$script:RemoteToolsRx = '(?i)(AnyDesk|TeamViewer|RustDesk|Ammyy|Remote Utilities|Remote Manipulator|RMS (Host|Viewer|Удал)|LiteManager|Radmin|UltraVNC|TightVNC|RealVNC|VNC Server|TigerVNC|Supremo|AeroAdmin|ScreenConnect|ConnectWise|LogMeIn|GoToAssist|GoTo Resolve|GoToMyPC|Splashtop|Atera|NetSupport|Getscreen|RuDesktop|DWAgent|DWService|MeshAgent|Mesh Agent|Chrome Remote Desktop|Удаленный рабочий стол Chrome|Parsec|HopToDesk|Iperius Remote|Zoho Assist|UltraViewer|NoMachine|AweSun|ToDesk|SimpleHelp|Action1|Tactical RMM|ZeroTier|Tailscale|Hamachi|Ассистент)'
+$script:RemoteToolsRx = '(?i)(AnyDesk|TeamViewer|RustDesk|Ammyy|Remote Utilities|Remote Manipulator|RMS (Host|Viewer|Удал)|LiteManager|Radmin|UltraVNC|TightVNC|RealVNC|VNC Server|TigerVNC|Supremo|AeroAdmin|ScreenConnect|ConnectWise|LogMeIn|GoToAssist|GoTo Resolve|GoToMyPC|Splashtop|\bAtera|NetSupport|Getscreen|RuDesktop|DWAgent|DWService|MeshAgent|Mesh Agent|Chrome Remote Desktop|Удаленный рабочий стол Chrome|Parsec|HopToDesk|Iperius Remote|Zoho Assist|UltraViewer|NoMachine|AweSun|\bToDesk|SimpleHelp|Action1|Tactical RMM|ZeroTier|Tailscale|Hamachi|Ассистент)'
 $script:FixDisableUser = {
     param($f)
     Disable-LocalUser -SID $f.Data.Sid
@@ -1537,14 +1542,16 @@ function Invoke-ProgramChecks {
     Start-Section 'Программы'
 
     Invoke-Check 'навязанные и нежелательные программы' {
-        $pup = @(Get-InstalledNames '(?i)(DriverPack|Driver Booster|Driver Easy|DriverMax|IObit|Advanced SystemCare|MediaGet|Zona\b|uTorrent|BitTorrent|Амиго|Amigo|Спутник@Mail|Mail\.Ru Агент|Агент Mail\.Ru|Guard@Mail|Кнопка .Яндекс|Менеджер браузеров|Browser Manager|Яндекс\.?\s?Элементы|WebAdvisor|ByteFence|Segurazo|PC Accelerate|OneLaunch|Wave Browser|PC App Store|Web Companion|Reimage|Restoro|MyCleanPC|Slimware|WinZip Driver|Avast Secure Browser|AVG Secure Browser|Opera GX Assistant|Hola VPN|TLauncher|KMSAuto|KMSpico|AAct)')
+        $pup = @(Get-InstalledNames '(?i)(DriverPack|Driver Booster|Driver Easy|DriverMax|IObit|Advanced SystemCare|MediaGet|\bZona\b|uTorrent|BitTorrent|Амиго|Amigo|Спутник@Mail|Mail\.Ru Агент|Агент Mail\.Ru|Guard@Mail|Кнопка .Яндекс|Менеджер браузеров|Browser Manager|Яндекс\.?\s?Элементы|WebAdvisor|ByteFence|Segurazo|PC Accelerate|OneLaunch|Wave Browser|PC App Store|Web Companion|Reimage|Restoro|MyCleanPC|Slimware|WinZip Driver|Avast Secure Browser|AVG Secure Browser|Opera GX Assistant|Hola VPN|TLauncher)')
         if ($pup.Count) { Add-Finding -Level WARN -Title "Навязанные и нежелательные программы: $($pup.Count)" -Detail $pup -Manual 'удалить через Параметры > Приложения > Установленные приложения' }
         else { Add-Finding -Level OK -Title 'Известных навязанных программ нет' }
     }
 
     Invoke-Check 'общий список' {
         $vis = @($script:Programs | Where-Object { -not $_.Hidden })
-        Add-Finding -Level INFO -Title "Установленных программ: $($vis.Count) (полный список - в report.txt)" -Detail @()
+        Add-Finding -Level INFO -Title "Установленных программ: $($vis.Count) (полный список - в report.txt)"
+        if ($script:ProgramsDumped) { return }
+        $script:ProgramsDumped = $true
         Out-ReportOnly ''
         Out-ReportOnly '--- установленные программы ---'
         foreach ($p in ($vis | Sort-Object Name)) { Out-ReportOnly "  $($p.Name) | $($p.Version) | $($p.Publisher)" }
@@ -1886,6 +1893,7 @@ function Invoke-Main {
             Invoke-AllChecks
             Set-FindingNumbers
             Show-Summary 'ПОСЛЕ ИСПРАВЛЕНИЯ (повторная проверка)'
+            if (@($script:Findings | Where-Object { $_.Fix -and $_.Num -gt 0 }).Count) { Out-Line ''; Out-Line '  Чтобы исправить оставшееся - запусти проверку ещё раз.' 'Gray' }
             if ($script:RebootNeeded) { Out-Line ''; Out-Line '  Нужна перезагрузка, чтобы изменения вступили в силу.' 'Yellow' }
         } else {
             Out-Line ''
