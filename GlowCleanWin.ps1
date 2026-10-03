@@ -29,6 +29,15 @@ GlowCleanWin.ps1 - проверка и лечение ПК с Windows 10/11.
   Свои "это нормально": GlowCleanWin_Reports\<компьютер>_ignore.txt - по одной строке, кусок заголовка пункта.
 
 В отчёт не попадают: командные строки целиком (в них бывают ключи), пароли, содержимое файлов.
+
+SPDX-License-Identifier: GPL-3.0-only
+Copyright (C) 2026 Glowlex
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, version 3.
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details: https://www.gnu.org/licenses/gpl-3.0.html
 #>
 param(
     [switch]$ReportOnly,
