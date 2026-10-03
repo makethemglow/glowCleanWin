@@ -561,7 +561,7 @@ $script:FixSignatures = {
     param($f)
     Update-MpSignature
     Add-Change 'defender' 'signatures updated'
-    return "базы обновлены: $((Get-MpComputerStatus).AntivirusSignatureLastUpdated)"
+    return "базы обновлены: $((Get-MpComputerStatus).AntivirusSignatureLastUpdated.ToString('dd.MM.yyyy HH:mm'))"
 }
 $script:FixPua = {
     param($f)
@@ -732,7 +732,7 @@ function Invoke-ProtectionChecks {
             $names = @{}
             try { foreach ($t in @(Get-MpThreat -ErrorAction Stop)) { $names["$($t.ThreatID)"] = "$($t.ThreatName)" } } catch { }
             $det = @($recent | Sort-Object InitialDetectionTime -Descending | Select-Object -First 15 | ForEach-Object { "$($_.InitialDetectionTime.ToString('dd.MM.yyyy HH:mm')) $($names["$($_.ThreatID)"])" })
-            Add-Finding -Level WARN -Title "За последние 60 дней Defender что-то ловил: $($recent.Count) срабатываний" -Detail $det -Manual 'Безопасность Windows > Журнал защиты - посмотреть, что это было и откуда'
+            Add-Finding -Level WARN -Title "За последние 60 дней Defender что-то ловил, срабатываний: $($recent.Count)" -Detail $det -Manual 'Безопасность Windows > Журнал защиты - посмотреть, что это было и откуда'
         } elseif ($active.Count -eq 0) {
             Add-Finding -Level OK -Title 'Активных угроз нет, за 60 дней срабатываний не было'
         }
@@ -841,7 +841,10 @@ $script:KnownRootRx = '(?i)(' + (@(
         'AffirmTrust', 'Certigna', 'SwissSign', 'NO LIABILITY ACCEPTED', 'Class 3 Public Primary', 'Network Solutions', 'HARICA', 'Hellenic', 'D-TRUST', 'Telia',
         'SECOM', 'Security Communication', 'Chunghwa', 'TWCA', 'emSign', 'eMudhra', 'Izenpe', 'ACCV', 'FNMT', 'Camerfirma', 'NetLock', 'Microsec', 'e-Szigno',
         'OISTE', 'WISeKey', 'Atos', 'Cybertrust', 'GTE CyberTrust', 'Verizon', 'certSIGN', 'TUBITAK', 'CFCA', 'Hongkong Post', 'NAVER', 'Staat der Nederlanden',
-        'SZAFIR', 'LuxTrust', 'Certinomis', 'Certplus', 'OpenTrust', 'Trustis', 'TeliaSonera', 'Sonera'
+        'SZAFIR', 'LuxTrust', 'Certinomis', 'Certplus', 'OpenTrust', 'Trustis', 'TeliaSonera', 'Sonera', 'Firmaprofesional', 'GDCA', 'GUANG DONG', 'UCA ', 'UniTrust',
+        'TrustAsia', 'ANF ', 'vTrus', 'iTrusChina', 'Certainly', 'Disig', 'TunTrust', 'Agence Nationale', 'BJCA', 'BEIJING CERTIFICATE', 'SHECA', 'E-Tugra', 'Kamu SM',
+        'ePKI', 'HiPKI', 'Viking Cloud', 'SecureSign', 'Chambersign', 'Chambers of Commerce', 'Swisscom', 'A-Trust', 'Halcom', 'SI-TRUST', 'Asseco', 'MULTICERT',
+        'Notarius', 'PKIoverheid', 'Japan Certification', 'Cisco', 'Autoridad de Certificacion', 'TrustCor', 'COMSIGN', 'Secure Global', 'Atos TrustedRoot'
     ) -join '|') + ')'
 
 function ConvertFrom-CertBlob {
@@ -901,6 +904,9 @@ function Get-StoreCerts {
                 $st.Open('ReadOnly')
                 foreach ($c in $st.Certificates) {
                     $key = "$s|$($c.Thumbprint)"
+                    # логическое хранилище Root включает в себя и AuthRoot - это не отдельная находка
+                    if ($s -eq 'Root' -and $map.ContainsKey("AuthRoot|$($c.Thumbprint)")) { continue }
+                    if ($s -eq 'AuthRoot' -and $map.ContainsKey("Root|$($c.Thumbprint)")) { continue }
                     if (-not $map.ContainsKey($key)) {
                         $map[$key] = [pscustomobject]@{ Store = $s; Thumb = $c.Thumbprint; Cert = $c; Where = @("$loc (видно только через API)"); RegPaths = @(); Api = @($loc); UserStore = ($loc -eq 'CurrentUser') }
                         $script:CertScanned++
@@ -956,14 +962,14 @@ $script:FixRemoveCert = {
         } catch { try { $st.Close() } catch { } }
     }
     if ($left.Count) { throw "сертификат всё ещё виден в $($left -join ', ') - его возвращает политика или программа; удалить вручную: certmgr.msc / certlm.msc > $($script:StoreNames[$d.Store])" }
-    return "удалён ($n записей реестра); копия: backup\certs\$($d.Store)_$($d.Thumb).cer"
+    return "удалён (записей реестра: $n); копия: backup\certs\$($d.Store)_$($d.Thumb).cer"
 }
 
 function Invoke-CertificateChecks {
     Start-Section 'Сертификаты'
     Invoke-Check 'доверенные хранилища сертификатов Windows' {
         $all = @(Get-StoreCerts)
-        $out = 0; $mitm = 0; $unk = 0
+        $out = 0; $mitm = 0; $unk = 0; $unkList = @()
         foreach ($e in ($all | Sort-Object Store, Thumb)) {
             $c = $e.Cert
             $name = $c.GetNameInfo('SimpleName', $false)
@@ -974,7 +980,9 @@ function Invoke-CertificateChecks {
                 $out++
                 if ($anchor -or $e.Store -eq 'CA') {
                     $what = 'Корневой'; if ($e.Store -eq 'CA') { $what = 'Промежуточный' }
-                    Add-Finding -Level BAD -Title "$what сертификат вне программ доверия Microsoft и Mozilla: $name" -Detail ((Get-CertLines $e) + @('с ним владелец сертификата может незаметно подменять любые HTTPS-сайты на этом компьютере')) `
+                    $why = 'с ним владелец сертификата может незаметно подменять любые HTTPS-сайты на этом компьютере'
+                    if ($e.Store -eq 'CA') { $why = 'сам по себе доверия не добавляет, но работает в паре с корневым' }
+                    Add-Finding -Level BAD -Title "$what сертификат вне программ доверия Microsoft и Mozilla: $name" -Detail ((Get-CertLines $e) + @($why)) `
                         -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется). Сайты, которые работают только на нём, начнут показывать предупреждение в браузере' -Data $data
                 } else {
                     Add-Finding -Level WARN -Title "Сертификат вне программ доверия в «$($script:StoreNames[$e.Store])»: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit
@@ -1000,7 +1008,14 @@ function Invoke-CertificateChecks {
             }
             if ($e.Store -eq 'Root' -and $c.Subject -notmatch $script:KnownRootRx) {
                 $unk++
-                Add-Finding -Level WARN -Title "Незнакомый корневой сертификат: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
+                $unkList += @{ E = $e; Name = $name; Data = $data }
+            }
+        }
+        if ($unkList.Count -gt 10) {
+            Add-Finding -Level WARN -Title "Много незнакомых корневых сертификатов: $($unkList.Count)" -Detail @($unkList | ForEach-Object { "$($_.Name) | $($_.E.Cert.Subject) | $(($_.E.Where | Sort-Object -Unique) -join '; ')" }) -Manual 'показать отчёт: либо на компьютере стоит корпоративное/специальное ПО, либо скрипт не узнал обычные сертификаты'
+        } else {
+            foreach ($u in $unkList) {
+                Add-Finding -Level WARN -Title "Незнакомый корневой сертификат: $($u.Name)" -Detail (Get-CertLines $u.E) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $u.Data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
             }
         }
         if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов вне программ доверия Microsoft и Mozilla в доверенных хранилищах нет (просмотрено сертификатов: $script:CertScanned)" }
@@ -1008,7 +1023,7 @@ function Invoke-CertificateChecks {
     }
 
     Invoke-Check 'программы для электронной подписи' {
-        $crypto = Get-InstalledNames '(?i)КриптоПро|CryptoPro|ViPNet|Lissi|Signal-COM|Плагин пользователя систем электронного|IFCPlugin|Рутокен|Rutoken|JaCarta|Контур\.?(Плагин|Диагностик)|Kontur\.Plugin'
+        $crypto = @(Get-InstalledNames '(?i)КриптоПро|CryptoPro|ViPNet|Lissi|Signal-COM|Плагин пользователя систем электронного|IFCPlugin|Рутокен|Rutoken|JaCarta|Контур\.?(Плагин|Диагностик)|Kontur\.Plugin')
         if ($crypto.Count) { Add-Finding -Level INFO -Title "Программы для электронной подписи: $($crypto.Count)" -Detail ($crypto + @('они сами ставят свои корневые сертификаты; если удалить сертификаты, а программы оставить - сертификаты могут вернуться')) }
     }
 }
@@ -1129,7 +1144,7 @@ function Invoke-BrowserChecks {
     }
 
     Invoke-Check 'браузеры с собственным списком доверенных сертификатов' {
-        $ya = Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom|^Atom$'
+        $ya = @(Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom')
         foreach ($up in $profiles) { if (Test-Path -LiteralPath (Join-P $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
         $ya = @($ya | Sort-Object -Unique)
         if ($ya.Count) {
@@ -1209,15 +1224,15 @@ function Invoke-NetworkChecks {
         $g = @{ SECURITY = @(); REDIRECT = @(); LICENSE = @(); BLOCK = @(); LOCAL = @() }
         foreach ($e in $entries) { $g[(Get-HostsVerdict $e)] += $e }
         if ($g.SECURITY.Count) {
-            Add-Finding -Level BAD -Title "hosts глушит сайты антивирусов и обновлений: $($g.SECURITY.Count) строк" -Detail @($g.SECURITY | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) `
+            Add-Finding -Level BAD -Title "hosts глушит сайты антивирусов и обновлений, строк: $($g.SECURITY.Count)" -Detail @($g.SECURITY | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) `
                 -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.SECURITY | ForEach-Object { $_.LineNo }) }
         }
         if ($g.REDIRECT.Count) {
-            Add-Finding -Level BAD -Title "hosts уводит сайты на посторонние адреса: $($g.REDIRECT.Count) строк" -Detail (@($g.REDIRECT | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так воруют пароли: набираешь адрес банка, а попадаешь на подделку')) `
+            Add-Finding -Level BAD -Title "hosts уводит сайты на посторонние адреса, строк: $($g.REDIRECT.Count)" -Detail (@($g.REDIRECT | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так воруют пароли: набираешь адрес банка, а попадаешь на подделку')) `
                 -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.REDIRECT | ForEach-Object { $_.LineNo }) }
         }
-        if ($g.LICENSE.Count) { Add-Finding -Level INFO -Title "hosts: блокировка серверов проверки лицензий - $($g.LICENSE.Count) строк (решение за хозяином компьютера)" -Detail @($g.LICENSE | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
-        if ($g.BLOCK.Count) { Add-Finding -Level INFO -Title "hosts: прочие блокировки сайтов - $($g.BLOCK.Count) строк" -Detail @($g.BLOCK | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
+        if ($g.LICENSE.Count) { Add-Finding -Level INFO -Title "hosts: блокировка серверов проверки лицензий, строк: $($g.LICENSE.Count) (решение за хозяином компьютера)" -Detail @($g.LICENSE | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
+        if ($g.BLOCK.Count) { Add-Finding -Level INFO -Title "hosts: прочие блокировки сайтов, строк: $($g.BLOCK.Count)" -Detail @($g.BLOCK | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
         if ($g.SECURITY.Count + $g.REDIRECT.Count -eq 0) { Add-Finding -Level OK -Title 'hosts: подмен адресов и блокировок антивирусов нет' }
     }
 
@@ -1286,6 +1301,17 @@ $script:FixRemoveTask = {
     Unregister-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName -Confirm:$false
     Add-Change 'task removed' "$($f.Data.TaskPath)$($f.Data.TaskName)"
     return 'задача удалена (копия в backup\tasks, вернуть: Register-ScheduledTask -Xml)'
+}
+
+$script:FixDeleteService = {
+    param($f)
+    $name = "$($f.Data.Name)"
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+    if (Test-Path -LiteralPath $key) { Export-RegKey $key ("service_" + ($name -replace '[^\w.-]', '_') + '.reg') | Out-Null }
+    $o = & sc.exe delete $name 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "sc delete: $(($o | Where-Object { $_ }) -join ' ')" }
+    Add-Change 'service deleted' $name
+    return 'запись службы удалена (копия ветки реестра в backup); окончательно исчезнет после перезагрузки'
 }
 
 function Invoke-AutorunChecks {
@@ -1416,7 +1442,7 @@ function Invoke-AutorunChecks {
             if (Test-MsSigned $sg) { continue }
             $det = @("файл: $exe ($(Get-SignerText $sg))", "запуск: $($s.StartMode); сейчас: $($s.State)")
             if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
-                if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Manual "от администратора: sc.exe delete `"$($s.Name)`"" }
+                if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
                 $lvl = 'WARN'; if (Test-UserWritablePath "$exe") { $lvl = 'BAD' }
@@ -1435,7 +1461,7 @@ function Invoke-AutorunChecks {
             if (Test-MsSigned $sg) { continue }
             $n++
             if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
-                if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Manual "от администратора: sc.exe delete `"$($d.Name)`"" }
+                if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Fix $script:FixDeleteService -FixText 'удалить запись драйвера (файла всё равно нет)' -Data @{ Name = "$($d.Name)" } }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
                 Add-Finding -Level WARN -Title "Драйвер с неподписанным файлом: $($d.Name)" -Detail @("файл: $exe ($(Get-SignerText $sg))") -Manual 'показать отчёт'
@@ -1469,7 +1495,10 @@ function Invoke-AutorunChecks {
                 $data = @{ Path = $k.PSPath; Name = 'Debugger' }
                 if ($k.PSChildName -match '(?i)^(sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe$') {
                     Add-Finding -Level BAD -Title "Чёрный ход на экране входа: вместо $($k.PSChildName) запускается $(Hide-Secrets "$dbg")" -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data
-                } elseif ($k.PSChildName -match '(?i)(MsMpEng|MpCmdRun|SecurityHealth|msmpeng|avp|taskmgr|regedit|msconfig|procexp|autoruns|rstrui)') {
+                } elseif ($k.PSChildName -match '(?i)^taskmgr\.exe$' -and "$dbg" -match '(?i)procexp|SystemInformer|ProcessHacker|TaskExplorer') {
+                    $bad--
+                    Add-Finding -Level INFO -Title "Диспетчер задач заменён на другую программу: $(Hide-Secrets "$dbg")" -Detail @('так делает Process Explorer / System Informer по твоей же настройке')
+                } elseif ($k.PSChildName -match '(?i)(MsMpEng|MpCmdRun|SecurityHealth|avp|taskmgr|regedit|msconfig|procexp|autoruns|rstrui)') {
                     Add-Finding -Level BAD -Title "Перехвачен запуск $($k.PSChildName): вместо неё стартует $(Hide-Secrets "$dbg")" -Detail @('так вирусы не дают запустить антивирус и диспетчер задач (а Process Explorer так честно заменяет диспетчер задач)') -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data -Explicit
                 } else {
                     Add-Finding -Level WARN -Title "Перехвачен запуск $($k.PSChildName): вместо неё стартует $(Hide-Secrets "$dbg")" -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data -Explicit

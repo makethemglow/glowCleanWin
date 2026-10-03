@@ -66,6 +66,8 @@ function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch]$Recurse, [
     if (Test-RegLike $LiteralPath) { $k = RK $LiteralPath; foreach ($x in @($global:Reg.Keys)) { if ($x -eq $k -or $x.StartsWith("$k\", [StringComparison]::OrdinalIgnoreCase)) { $global:Reg.Remove($x) } }; return }
     Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
 }
+function sc.exe { $global:LASTEXITCODE = 0; $global:ScDeleted += , "$args"; '[SC] DeleteService SUCCESS' }
+$global:ScDeleted = @()
 function reg.exe { $global:RegExports += , "$args" }
 $global:RegExports = @()
 function Join-P { param([string]$Parent, [string]$Child) if ($Parent -match '^([A-Za-z]:\\|HK|Registry|Microsoft\.)') { return ($Parent.TrimEnd('\') + '\' + $Child.TrimStart('\')) }; return [IO.Path]::Combine($Parent, ($Child -replace '\\', '/')) }
