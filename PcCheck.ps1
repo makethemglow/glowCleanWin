@@ -1308,13 +1308,24 @@ function Invoke-NetworkChecks {
         $entries = @(Get-HostsEntries @(Get-Content -LiteralPath $script:HostsPath))
         $g = @{ SECURITY = @(); REDIRECT = @(); LICENSE = @(); BLOCK = @(); LOCAL = @() }
         foreach ($e in $entries) { $g[(Get-HostsVerdict $e)] += $e }
-        if ($g.SECURITY.Count) {
+        # большой hosts - это чей-то готовый список блокировки рекламы; в нём домены антивирусов встречаются как счётчики, а не как диверсия
+        $blockList = (($g.SECURITY.Count + $g.LICENSE.Count + $g.BLOCK.Count) -gt 300)
+        if ($g.SECURITY.Count -and $blockList) {
+            Add-Finding -Level INFO -Title "hosts: большой список блокировок, в нём есть и домены антивирусов, строк: $($g.SECURITY.Count)" -Detail @($g.SECURITY | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" })
+        } elseif ($g.SECURITY.Count) {
             Add-Finding -Level BAD -Title "hosts глушит сайты антивирусов и обновлений, строк: $($g.SECURITY.Count)" -Detail @($g.SECURITY | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) `
                 -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.SECURITY | ForEach-Object { $_.LineNo }) }
         }
-        if ($g.REDIRECT.Count) {
-            Add-Finding -Level BAD -Title "hosts уводит сайты на посторонние адреса, строк: $($g.REDIRECT.Count)" -Detail (@($g.REDIRECT | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так воруют пароли: набираешь адрес банка, а попадаешь на подделку')) `
-                -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.REDIRECT | ForEach-Object { $_.LineNo }) }
+        $money = '(?i)(sber|tinkoff|tbank|vtb\.|alfabank|alfa-bank|gazprombank|raiffeisen|rshb|psbank|pochtabank|bank|gosuslugi|nalog\.|esia\.|qiwi|yoomoney|paypal|mos\.ru)'
+        $redBank = @($g.REDIRECT | Where-Object { ($_.Names -join ' ') -match $money })
+        $redOther = @($g.REDIRECT | Where-Object { ($_.Names -join ' ') -notmatch $money })
+        if ($redBank.Count) {
+            Add-Finding -Level BAD -Title "hosts уводит важные сайты на посторонние адреса, строк: $($redBank.Count)" -Detail (@($redBank | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так воруют пароли: набираешь адрес банка, а попадаешь на подделку')) `
+                -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($redBank | ForEach-Object { $_.LineNo }) }
+        }
+        if ($redOther.Count) {
+            Add-Finding -Level WARN -Title "hosts направляет сайты на посторонние адреса, строк: $($redOther.Count)" -Detail (@($redOther | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так делают и списки для обхода блокировок, и вредные программы; владелец этих адресов видит, куда ты ходишь')) `
+                -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($redOther | ForEach-Object { $_.LineNo }) } -Explicit -Manual 'если добавлял сам для обхода блокировок - твой выбор; если нет - отключить по номеру'
         }
         if ($g.LICENSE.Count) { Add-Finding -Level INFO -Title "hosts: блокировка серверов проверки лицензий, строк: $($g.LICENSE.Count) (решение за хозяином компьютера)" -Detail @($g.LICENSE | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
         if ($g.BLOCK.Count) { Add-Finding -Level INFO -Title "hosts: прочие блокировки сайтов, строк: $($g.BLOCK.Count)" -Detail @($g.BLOCK | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
@@ -1329,7 +1340,12 @@ function Invoke-NetworkChecks {
             $on = ($null -ne $en -and [int]$en -eq 1 -and $srv)
             if ($pac) {
                 $any = $true
-                Add-Finding -Level BAD -Title "Весь трафик идёт через сценарий автонастройки прокси ($($h.Name))" -Detail @("адрес сценария: $pac", 'так вредные программы пропускают через себя банковские сайты') -Fix $script:FixProxy -FixText 'убрать сценарий автонастройки' -Data @{ Key = $k; Pac = $true; Proxy = $false }
+                $pacShown = Hide-Secrets ("$pac" -replace '\?.*$', '?...')
+                if ("$pac" -match '(?i)^(https?://)?(127\.0\.0\.1|localhost|\[::1\])[:/]|^file:') {
+                    Add-Finding -Level WARN -Title "Включён локальный сценарий автонастройки прокси ($($h.Name))" -Detail @("адрес сценария: $pacShown", 'обычно это VPN-клиент или программа обхода блокировок на этом же компьютере') -Fix $script:FixProxy -FixText 'убрать сценарий автонастройки' -Data @{ Key = $k; Pac = $true; Proxy = $false } -Explicit
+                } else {
+                    Add-Finding -Level BAD -Title "Весь трафик идёт через чужой сценарий автонастройки прокси ($($h.Name))" -Detail @("адрес сценария: $pacShown", 'так вредные программы пропускают через себя банковские сайты') -Fix $script:FixProxy -FixText 'убрать сценарий автонастройки (адрес сохраняется в backup)' -Data @{ Key = $k; Pac = $true; Proxy = $false }
+                }
             }
             if ($on) {
                 $any = $true
@@ -1432,7 +1448,7 @@ function Invoke-AutorunChecks {
                 if ($risk -eq 'BAD') {
                     $flag++
                     Add-Finding -Level BAD -Title "Автозапуск похож на вредоносный: $n ($($k.T))" -Detail (@("команда: $(Hide-Secrets $v)") + $det) -Fix $script:FixRemoveRunValue -FixText 'удалить запись автозапуска' -Data $data -Explicit -Manual 'если сам такого не настраивал - удалить по номеру и запустить полную проверку Defender'
-                } elseif ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe")) {
+                } elseif (Test-DeadTarget $v "$exe" $sg) {
                     $flag++
                     Add-Finding -Level WARN -Title "Автозапуск ведёт на несуществующий файл: $n ($($k.T))" -Detail $det -Fix $script:FixRemoveRunValue -FixText 'удалить мёртвую запись' -Data $data
                 } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and (Test-UserWritablePath "$exe")) {
@@ -1461,9 +1477,9 @@ function Invoke-AutorunChecks {
                 if ($f.Extension -eq '.lnk') {
                     $tg = Get-LnkTarget $f.FullName
                     $sg = Get-Signer $tg
-                    if ($tg -and $sg -eq 'FILE NOT FOUND' -and (Test-FullPath $tg) -and -not (Test-DriveMissing $tg)) {
+                    if ($tg -and (Test-DeadTarget '' $tg $sg)) {
                         $flag++
-                        Add-Finding -Level WARN -Title "Ярлык в автозагрузке ведёт на несуществующий файл: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать мёртвый ярлык (копия в backup)' -Data $data
+                        Add-Finding -Level WARN -Title "Ярлык в автозагрузке ведёт на несуществующий файл: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать мёртвый ярлык (копия в backup)' -Data $data -Explicit:$script:Ctx.Differs
                     } elseif ($tg -and -not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and (Test-UserWritablePath $tg)) {
                         $flag++
                         Add-Finding -Level WARN -Title "В автозагрузке неподписанная программа из пользовательской папки: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать ярлык из автозагрузки (копия в backup)' -Data $data -Explicit
@@ -1486,7 +1502,7 @@ function Invoke-AutorunChecks {
 
     Invoke-Check 'задачи планировщика' {
         $fine = @(); $flag = 0
-        foreach ($t in @(Get-ScheduledTask | Sort-Object TaskPath, TaskName)) {
+        foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Sort-Object TaskPath, TaskName)) {
             $inMs = ($t.TaskPath -like '\Microsoft\*')
             $full = "$($t.TaskPath)$($t.TaskName)"
             $data = @{ TaskPath = "$($t.TaskPath)"; TaskName = "$($t.TaskName)"; DisableOnly = $false }
@@ -1498,18 +1514,18 @@ function Invoke-AutorunChecks {
                 $risk = Get-CommandRisk $cmd
                 if ($inMs -and $risk -ne 'BAD' -and ((Test-MsSigned $sg) -or $sg -eq 'FILE NOT FOUND' -or $sg -eq 'no path')) { continue }
                 $det = @("файл: $exe ($(Get-SignerText $sg))", "состояние: $($t.State); автор: $($t.Author)")
-                $dead = ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe"))
-                if ("$($t.State)" -eq 'Disabled' -and -not $dead) {
+                $dead = Test-DeadTarget $cmd "$exe" $sg
+                if ("$($t.State)" -eq 'Disabled') {
                     # отключённая задача не запускается; показываем только как справку
-                    if ($risk -or -not (Test-ValidSigned $sg)) { $fine += "ОТКЛЮЧЕНА: $full -> $(Hide-Secrets $cmd 80)" }
+                    if ($risk -or $dead -or -not (Test-ValidSigned $sg)) { $fine += "ОТКЛЮЧЕНА: $full -> $(Hide-Secrets $cmd 80)" }
                     continue
                 }
                 if ($risk -eq 'BAD') {
                     $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
                     Add-Finding -Level BAD -Title "Задача планировщика похожа на вредоносную: $full" -Detail (@("команда: $(Hide-Secrets $cmd)") + $det) -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если сам такого не настраивал - отключить по номеру и запустить полную проверку Defender'
-                } elseif ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe")) {
-                    $flag++
-                    Add-Finding -Level WARN -Title "Задача планировщика запускает несуществующий файл: $full" -Detail $det -Fix $script:FixRemoveTask -FixText 'удалить мёртвую задачу (копия XML в backup)' -Data $data
+                } elseif ($dead) {
+                    $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
+                    Add-Finding -Level WARN -Title "Задача планировщика запускает несуществующий файл: $full" -Detail $det -Fix $script:FixRemoveTask -FixText 'отключить мёртвую задачу (не удаляется; копия XML в backup)' -Data $d2
                 } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path' -and (Test-UserWritablePath "$exe")) {
                     $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
                     Add-Finding -Level WARN -Title "Задача запускает неподписанную программу из пользовательской папки: $full" -Detail $det -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если программа незнакома - отключить по номеру'
@@ -1533,7 +1549,7 @@ function Invoke-AutorunChecks {
             $sg = Get-Signer $exe
             if (Test-MsSigned $sg) { continue }
             $det = @("файл: $exe ($(Get-SignerText $sg))", "запуск: $($s.StartMode); сейчас: $($s.State)")
-            if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
+            if (Test-DeadTarget "$($s.PathName)" "$exe" $sg) {
                 if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } -Explicit }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
@@ -1552,7 +1568,7 @@ function Invoke-AutorunChecks {
             $sg = Get-Signer $exe
             if (Test-MsSigned $sg) { continue }
             $n++
-            if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
+            if (Test-DeadTarget "$($d.PathName)" "$exe" $sg) {
                 if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Fix $script:FixDeleteService -FixText 'удалить запись драйвера (файла всё равно нет)' -Data @{ Name = "$($d.Name)" } -Explicit }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
@@ -1688,14 +1704,19 @@ function Invoke-ProgramChecks {
 }
 
 # ================================================================ 9. РЕКЛАМА И СЛЕЖКА WINDOWS
-$script:PromoApps = @(
-    'Microsoft.BingNews', 'Microsoft.BingSearch', 'Microsoft.Copilot', 'Microsoft.MicrosoftOfficeHub', 'Clipchamp.Clipchamp', 'Microsoft.PowerAutomateDesktop',
+# рекламные заглушки самой Microsoft: данных пользователя в них нет
+$script:PromoMs = @(
+    'Microsoft.BingNews', 'Microsoft.BingSearch', 'Microsoft.Copilot', 'Microsoft.MicrosoftOfficeHub', 'Microsoft.PowerAutomateDesktop',
     'Microsoft.Windows.DevHome', 'Microsoft.WindowsFeedbackHub', 'Microsoft.Edge.GameAssist', 'Microsoft.549981C3F5F10', 'Microsoft.MixedReality.Portal',
     'Microsoft.Microsoft3DViewer', 'Microsoft.3DBuilder', 'Microsoft.Print3D', 'Microsoft.Getstarted', 'Microsoft.Messaging', 'Microsoft.OneConnect', 'Microsoft.SkypeApp',
-    'MicrosoftTeams', 'Microsoft.StartExperiencesApp', '7EE7776C.LinkedInforWindows', 'king.com.*', '*.TikTok', 'Facebook.Facebook', 'Disney.*', 'AmazonVideo.PrimeVideo',
-    '*CandyCrush*', '*BubbleWitch*', '*.Netflix', '*HiddenCity*', '*MarchofEmpires*', '*.Twitter', 'Microsoft.MicrosoftJournal', 'MicrosoftCorporationII.MicrosoftFamily'
+    'Microsoft.StartExperiencesApp', 'Microsoft.MicrosoftJournal', 'MicrosoftCorporationII.MicrosoftFamily'
 )
-function Test-PromoName { param([string]$Name) foreach ($pat in $script:PromoApps) { if ($Name -like $pat) { return $true } }; return $false }
+# предустановленные игры и приложения сторонних фирм: ими могли пользоваться, внутри могут быть свои данные - только по номеру
+$script:PromoThird = @(
+    'Clipchamp.Clipchamp', 'MicrosoftTeams', '7EE7776C.LinkedInforWindows', 'king.com.*', '*.TikTok', 'Facebook.*', 'Disney.*', 'AmazonVideo.PrimeVideo',
+    '*CandyCrush*', '*BubbleWitch*', '*.Netflix', '*HiddenCity*', '*MarchofEmpires*', '*.Twitter', 'SpotifyAB.SpotifyMusic'
+)
+function Test-NameLike { param([string]$Name, [string[]]$Patterns) foreach ($pat in $Patterns) { if ($Name -like $pat) { return $true } }; return $false }
 
 function Get-PrivacySettings {
     $u = $script:Ctx.MainHive
@@ -1754,7 +1775,7 @@ $script:FixPromoApps = {
         } catch { $fail++; Out-ReportOnly "       не удалилось: $full - $(($_.Exception.Message -split "`n")[0])" }
     }
     try {
-        foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { Test-PromoName "$($_.DisplayName)" })) {
+        foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { Test-NameLike "$($_.DisplayName)" $f.Data.Patterns })) {
             try { Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop | Out-Null; Add-Change 'appx deprovisioned' "$($p.PackageName)" } catch { }
         }
     } catch { }
@@ -1781,7 +1802,7 @@ function Invoke-PrivacyChecks {
         foreach ($s in $all) { $cur = Get-RegValue $s.P $s.N; if ($null -eq $cur -or "$cur" -ne "$($s.V)") { $todo += $s } }
         if ($todo.Count) {
             Add-Finding -Level WARN -Title "Реклама, подсказки и сбор данных Windows: не выключено $($todo.Count) из $($all.Count)" -Detail @($todo | ForEach-Object { $_.D }) `
-                -Fix $script:FixPrivacy -FixText "выключить всё перечисленное для пользователя $($script:Ctx.MainName) (старые значения сохраняются; на работу программ не влияет)" -Data @{ Todo = $todo }
+                -Fix $script:FixPrivacy -FixText "выключить всё перечисленное для пользователя $($script:Ctx.MainName) (старые значения сохраняются; на работу программ не влияет; в Параметрах и в Edge местами появится надпись «управляется организацией» - это от этих настроек)" -Data @{ Todo = $todo }
         } else { Add-Finding -Level OK -Title "Реклама, подсказки и сбор данных Windows выключены ($($all.Count) настроек)" }
     }
 
@@ -1800,11 +1821,16 @@ function Invoke-PrivacyChecks {
     Invoke-Check 'рекламные приложения' {
         $pk = @()
         if ($script:Ctx.Differs) { $pk = @(Get-AppxPackage -User $script:Ctx.MainSid -ErrorAction Stop) } else { $pk = @(Get-AppxPackage -ErrorAction Stop) }
-        $promo = @($pk | Where-Object { Test-PromoName "$($_.Name)" })
+        $promo = @($pk | Where-Object { Test-NameLike "$($_.Name)" $script:PromoMs })
+        $third = @($pk | Where-Object { Test-NameLike "$($_.Name)" $script:PromoThird })
         if ($promo.Count) {
-            Add-Finding -Level WARN -Title "Рекламные и ненужные встроенные приложения: $($promo.Count)" -Detail @($promo | ForEach-Object { "$($_.Name)" } | Sort-Object -Unique) `
-                -Fix $script:FixPromoApps -FixText 'удалить эти приложения (любое можно вернуть из Microsoft Store)' -Data @{ Packages = @($promo | ForEach-Object { "$($_.PackageFullName)" }); OtherUser = $script:Ctx.Differs; Sid = $script:Ctx.MainSid }
-        } else { Add-Finding -Level OK -Title 'Рекламных встроенных приложений нет' }
+            Add-Finding -Level WARN -Title "Рекламные встроенные приложения Microsoft: $($promo.Count)" -Detail @($promo | ForEach-Object { "$($_.Name)" } | Sort-Object -Unique) `
+                -Fix $script:FixPromoApps -FixText 'удалить эти приложения (любое можно вернуть из Microsoft Store)' -Data @{ Packages = @($promo | ForEach-Object { "$($_.PackageFullName)" }); Patterns = $script:PromoMs; OtherUser = $script:Ctx.Differs; Sid = $script:Ctx.MainSid }
+        } else { Add-Finding -Level OK -Title 'Рекламных встроенных приложений Microsoft нет' }
+        if ($third.Count) {
+            Add-Finding -Level WARN -Title "Предустановленные сторонние приложения и игры: $($third.Count)" -Detail @($third | ForEach-Object { "$($_.Name)" } | Sort-Object -Unique) `
+                -Fix $script:FixPromoApps -FixText 'удалить эти приложения вместе с их данными (вернуть можно из Microsoft Store, данные - нет)' -Data @{ Packages = @($third | ForEach-Object { "$($_.PackageFullName)" }); Patterns = $script:PromoThird; OtherUser = $script:Ctx.Differs; Sid = $script:Ctx.MainSid } -Explicit -Manual 'если ими никто не пользуется - удалить по номеру'
+        }
     }
 }
 
@@ -1893,13 +1919,17 @@ function Resolve-Selection {
     # 'YES' - красное; 'ALL' - красное и жёлтое; номера и диапазоны - явно. Пункты "только по номеру" берутся только по номеру.
     param([string]$Text, $Findings)
     $pick = @{}
+    $script:SelectionError = ''
     $fixable = @($Findings | Where-Object { $_.Fix -and $_.Num -gt 0 })
     foreach ($tok in @(("$Text".ToUpper() -replace '[,;]', ' ') -split '\s+' | Where-Object { $_ })) {
-        if ($tok -eq 'YES' -or $tok -eq 'ДА' -or $tok -eq 'Y') { foreach ($f in $fixable) { if ($f.Level -eq 'BAD' -and -not $f.Explicit) { $pick[$f.Num] = $f } } }
+        if ($tok -eq 'YES' -or $tok -eq 'ДА') { foreach ($f in $fixable) { if ($f.Level -eq 'BAD' -and -not $f.Explicit) { $pick[$f.Num] = $f } } }
         elseif ($tok -eq 'ALL' -or $tok -eq 'ВСЕ' -or $tok -eq 'ВСЁ') { foreach ($f in $fixable) { if (-not $f.Explicit) { $pick[$f.Num] = $f } } }
-        elseif ($tok -match '^#?(\d+)$') { $n = [int]$matches[1]; foreach ($f in $fixable) { if ($f.Num -eq $n) { $pick[$f.Num] = $f } } }
-        elseif ($tok -match '^#?(\d+)-#?(\d+)$') { $a = [int]$matches[1]; $b = [int]$matches[2]; foreach ($f in $fixable) { if ($f.Num -ge $a -and $f.Num -le $b) { $pick[$f.Num] = $f } } }
+        elseif ($tok -match '^#?(\d{1,4})$') { $n = [int]$matches[1]; foreach ($f in $fixable) { if ($f.Num -eq $n) { $pick[$f.Num] = $f } } }
+        elseif ($tok -match '^#?(\d{1,4})-#?(\d{1,4})$') { $a = [int]$matches[1]; $b = [int]$matches[2]; foreach ($f in $fixable) { if ($f.Num -ge $a -and $f.Num -le $b) { $pick[$f.Num] = $f } } }
+        else { $script:SelectionError = $tok }
     }
+    # любое непонятное слово в ответе ("not all", "yes?") - не делаем ничего
+    if ($script:SelectionError) { return @() }
     return @($pick.Keys | Sort-Object | ForEach-Object { $pick[$_] })
 }
 
@@ -2025,6 +2055,7 @@ function Invoke-Main {
             if ($script:RebootNeeded) { Out-Line ''; Out-Line '  Нужна перезагрузка, чтобы изменения вступили в силу.' 'Yellow' }
         } else {
             Out-Line ''
+            if ($script:SelectionError) { Out-Line "  Не понял слово «$script:SelectionError» в ответе - на всякий случай ничего не трогаю. Запусти проверку ещё раз." 'Yellow' }
             Out-Line '  Ничего не изменено.' 'Gray'
         }
     } elseif ($ReportOnly) {

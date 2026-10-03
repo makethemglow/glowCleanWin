@@ -68,6 +68,8 @@ function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch]$Recurse, [
 }
 function sc.exe { $global:LASTEXITCODE = 0; $global:ScDeleted += , "$args"; '[SC] DeleteService SUCCESS' }
 $global:ScDeleted = @()
+function New-RegKeyRaw { param([string]$Path) RSet $Path $null $null }
+function Remove-RegValueRaw { param([string]$Path, [string]$Name) $k = RK $Path; if ($global:Reg[$k]) { $global:Reg[$k].Remove($Name) } }
 function reg.exe { $global:RegExports += , "$args" }
 $global:RegExports = @()
 function Join-P { param([string]$Parent, [string]$Child) if ($Parent -match '^([A-Za-z]:\\|HK|Registry|Microsoft\.)') { return ($Parent.TrimEnd('\') + '\' + $Child.TrimStart('\')) }; return [IO.Path]::Combine($Parent, ($Child -replace '\\', '/')) }
@@ -185,7 +187,7 @@ function Remove-AppxProvisionedPackage { [CmdletBinding()] param([switch]$Online
 # hosts + firefox + startup on the real FS
 $script:HostsPath = Join-Path $work 'hosts'
 $hostsLines = @('# hosts', '127.0.0.1 localhost', '0.0.0.0 lmlicenses.wip4.adobe.com')
-if (-not $Clean) { $hostsLines += @('0.0.0.0 update.kaspersky.com', '5.6.7.8 online.sberbank.ru') }
+if (-not $Clean) { $hostsLines += @('0.0.0.0 update.kaspersky.com', '5.6.7.8 online.sberbank.ru', '204.12.192.222 chatgpt.com') }
 Set-Content -LiteralPath $script:HostsPath -Value $hostsLines
 $ffp = Join-Path $prof 'AppData/Roaming/Mozilla/Firefox/Profiles/abc.default-release'
 New-Item -ItemType Directory -Path $ffp -Force | Out-Null

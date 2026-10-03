@@ -33,9 +33,9 @@ T 'native PSPath' (ConvertTo-NativeRegPath 'Microsoft.PowerShell.Core\Registry::
 T 'native Reg::' (ConvertTo-NativeRegPath 'Registry::HKEY_USERS\S-1\X') 'HKEY_USERS\S-1\X'
 T 'signer text' (Get-SignerText 'Valid | Valve Corp.') 'подпись: Valve Corp.'
 T 'ms signed' (Test-MsSigned 'Valid | Microsoft Windows') 'True'
-T 'promo king' (Test-PromoName 'king.com.CandyCrushSaga') 'True'
-T 'promo calc' (Test-PromoName 'Microsoft.WindowsCalculator') 'False'
-T 'promo MSTeams (new teams kept)' (Test-PromoName 'MSTeams') 'False'
+T 'promo king' (Test-NameLike 'king.com.CandyCrushSaga' $script:PromoThird) 'True'
+T 'promo calc' (Test-NameLike 'Microsoft.WindowsCalculator' ($script:PromoMs + $script:PromoThird)) 'False'
+T 'promo MSTeams (new teams kept)' (Test-NameLike 'MSTeams' ($script:PromoMs + $script:PromoThird)) 'False'
 
 # hosts
 $h = @('# comment', '127.0.0.1 localhost', '0.0.0.0 lmlicenses.wip4.adobe.com', '0.0.0.0 update.kaspersky.com # x', '5.6.7.8 online.sberbank.ru www.sberbank.ru', '192.168.1.5 nas', '0.0.0.0 ads.example.com', '', '::1 localhost')
@@ -46,6 +46,11 @@ T 'hosts lineno' ($e[3].LineNo) 5
 
 # RU cert regex
 T 'name hash ignores case and spaces' ((Get-NameHash ' Example CA ') -eq (Get-NameHash 'example ca')) 'True'
+T 'secret pwd' (Hide-Secrets 'app.exe -Password Qwerty123! -Token ghp_short123 https://user:p4ss@host/x') 'app.exe -Password [скрыто] -Token [скрыто] https://[скрыто]@host/x'
+T 'secret regpath kept' (Hide-Secrets 'HKEY_LOCAL_MACHINE\SOFTWARE\Run | Dead') 'HKEY_LOCAL_MACHINE\SOFTWARE\Run | Dead'
+T 'dead with %' (Test-DeadTarget '%LOCALAPPDATA%\x\a.exe' 'C:\Users\adm\AppData\Local\x\a.exe' 'FILE NOT FOUND') 'False'
+T 'dead windowsapps' (Test-DeadTarget 'C:\Program Files\WindowsApps\x\a.exe' 'C:\Program Files\WindowsApps\x\a.exe' 'FILE NOT FOUND') 'False'
+T 'blob huge len' ($null -eq (ConvertFrom-CertBlob ([byte[]](32,0,0,0,1,0,0,0,255,255,255,255,1,2,3)))) 'True'
 T 'known ms' ('CN=Microsoft Root Certificate Authority 2011, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -match $script:KnownRootRx) 'True'
 T 'known unknown' ('CN=NVIDIA GameStream Server' -match $script:KnownRootRx) 'False'
 T 'remote autodesk' ('Autodesk Fusion' -match $script:RemoteToolsRx) 'False'
@@ -84,6 +89,8 @@ T 'sel YES' ((Resolve-Selection 'yes' $script:Findings | ForEach-Object { $_.Tit
 T 'sel ALL' ((Resolve-Selection 'all' $script:Findings | ForEach-Object { $_.Title }) -join ',') 'b1,w1'
 T 'sel nums' ((Resolve-Selection '2, 4' $script:Findings | ForEach-Object { $_.Title }) -join ',') 'b2 explicit,w2 explicit'
 T 'sel range' ((Resolve-Selection '1-3' $script:Findings | ForEach-Object { $_.Title }) -join ',') 'b1,b2 explicit,w1'
+T 'sel not all' (@(Resolve-Selection 'not all' $script:Findings).Count) 0
+T 'sel yes please' (@(Resolve-Selection 'yes please' $script:Findings).Count) 0
 T 'sel YES+num' ((Resolve-Selection 'YES #4' $script:Findings | ForEach-Object { $_.Title }) -join ',') 'b1,w2 explicit'
 T 'sel empty' (@(Resolve-Selection '' $script:Findings).Count) 0
 T 'sel no' (@(Resolve-Selection 'no' $script:Findings).Count) 0
