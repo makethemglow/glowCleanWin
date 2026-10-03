@@ -195,6 +195,7 @@ function Add-BackupLine {
 function Add-Change {
     param([string]$Type, [string]$What)
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`t$Type`t$What"
+    if ($script:DemoMode) { return }
     try { [IO.File]::AppendAllText($script:JournalFile, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false))) } catch { }
     Out-ReportOnly "       журнал: $Type | $What"
 }
@@ -312,7 +313,16 @@ function Get-ExePath {
     $p = $null
     if ($c -match '^"([^"]+)"') { $p = $matches[1] }
     elseif ($c -match '^(.+?\.(exe|dll|sys|cmd|bat|ps1|vbs|vbe|js|jse|wsf|com|scr|hta|msi|lnk))(\s|,|$)') { $p = $matches[1] }
-    else { $p = ($c -split '\s+')[0] }
+    else {
+        # путь без кавычек и без расширения: как сама Windows, пробуем всё более длинные куски до пробела
+        $parts = @($c -split ' '); $acc = ''
+        foreach ($part in $parts) {
+            $acc = ("$acc $part").TrimStart()
+            if ($acc -match '[\\/]' -and (Test-PathSafe $acc 'Leaf')) { $p = $acc; break }
+            if ($acc -match '[\\/]' -and (Test-PathSafe "$acc.exe" 'Leaf')) { $p = "$acc.exe"; break }
+        }
+        if (-not $p) { $p = $parts[0] }
+    }
     if ($p -and ($p -notmatch '[\\/]')) {
         $g = Get-Command $p -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($g) { $p = $g.Source }
@@ -1456,7 +1466,7 @@ function Invoke-AutorunChecks {
             if (Test-MsSigned $sg) { continue }
             $det = @("файл: $exe ($(Get-SignerText $sg))", "запуск: $($s.StartMode); сейчас: $($s.State)")
             if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
-                if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } }
+                if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } -Explicit }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
                 $lvl = 'WARN'; if (Test-UserWritablePath "$exe") { $lvl = 'BAD' }
@@ -1475,7 +1485,7 @@ function Invoke-AutorunChecks {
             if (Test-MsSigned $sg) { continue }
             $n++
             if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
-                if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Fix $script:FixDeleteService -FixText 'удалить запись драйвера (файла всё равно нет)' -Data @{ Name = "$($d.Name)" } }
+                if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Fix $script:FixDeleteService -FixText 'удалить запись драйвера (файла всё равно нет)' -Data @{ Name = "$($d.Name)" } -Explicit }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
                 $flag++
                 Add-Finding -Level WARN -Title "Драйвер с неподписанным файлом: $($d.Name)" -Detail @("файл: $exe ($(Get-SignerText $sg))") -Manual 'показать отчёт'
@@ -1909,7 +1919,7 @@ function Invoke-Main {
     if ($script:DemoMode) { Out-Line '  ДЕМО-РЕЖИМ: ничего не проверяется и не меняется, данные выдуманы' 'Yellow' }
     if ($script:IgnoreList.Count) { Out-Line "  подключён список «это нормально»: строк - $($script:IgnoreList.Count)" 'Gray' }
     Write-Host ''
-    Write-Host '  Собираю данные (2-5 минут; дольше всего - поиск обновлений и проверка подписей)...' -ForegroundColor Cyan
+    if (-not $script:DemoMode) { Write-Host '  Собираю данные (2-5 минут; дольше всего - поиск обновлений и проверка подписей)...' -ForegroundColor Cyan }
     Invoke-AllChecks
     if (-not $script:DemoMode -and $script:Ctx.Differs) {
         Out-Line ''

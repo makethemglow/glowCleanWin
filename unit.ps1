@@ -93,3 +93,10 @@ $script:IgnoreList = @('tailscale')
 Add-Finding -Level WARN -Title 'Установлены программы удалённого доступа: Tailscale' -Fix $fx
 T 'ignore' ($script:Findings[-1].Level + '|' + [bool]$script:Findings[-1].Fix) 'INFO|False'
 "FAILED: $fail"
+# unquoted path without extension, resolved against real files
+$d = Join-Path ([IO.Path]::GetTempPath()) 'pc check dir'; New-Item -ItemType Directory -Path $d -Force | Out-Null
+Set-Content (Join-Path $d 'service') 'x'; Set-Content (Join-Path $d 'tool.exe') 'x'
+T 'exe noext' (Get-ExePath "$d/service --run now") "$d/service"
+T 'exe implied .exe' (Get-ExePath "$d/tool /x") "$d/tool.exe"
+T 'exe fallback' (Get-ExePath 'C:\Nope dir\svc --run') 'C:\Nope'
+"FAILED total: $fail"
