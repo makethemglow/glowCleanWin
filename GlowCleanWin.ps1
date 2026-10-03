@@ -564,7 +564,9 @@ function Invoke-SystemChecks {
             $det = @()
             if ($r) {
                 $parts = @()
-                if ($null -ne $r.Wear) { $parts += "износ $($r.Wear)%" }
+                # у многих дисков Windows отдаёт здесь 0 вместо настоящего износа - ноль не показываем
+                if ($r.Wear -gt 0) { $parts += "износ $($r.Wear)%" }
+                elseif ("$($d.MediaType)" -eq 'SSD') { $parts += 'износ Windows не сообщает (смотреть в CrystalDiskInfo)' }
                 if ($r.Temperature) { $parts += "температура $($r.Temperature) C" }
                 if ($r.PowerOnHours) { $parts += "наработка $($r.PowerOnHours) ч" }
                 if ($r.ReadErrorsUncorrected) { $parts += "неисправленных ошибок чтения: $($r.ReadErrorsUncorrected)" }
@@ -641,6 +643,14 @@ $script:FixRealtime = {
     Add-Change 'defender' 'realtime protection enabled'
     return 'защита в реальном времени включена'
 }
+$script:FixGhostAv = {
+    param($f)
+    foreach ($i in @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { "$($_.instanceGuid)" -eq $f.Data.Guid })) { Remove-CimInstance -InputObject $i }
+    $left = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { "$($_.instanceGuid)" -eq $f.Data.Guid })
+    if ($left.Count) { throw 'запись не удалилась (защищена системой)' }
+    Add-Change 'security center entry removed' "$($f.Data.Name)`t$($f.Data.Guid)"
+    return 'запись удалена'
+}
 $script:FixSignatures = {
     param($f)
     Update-MpSignature
@@ -713,6 +723,15 @@ function Invoke-ProtectionChecks {
             $on = (([int]$a.productState) -band 0x1000) -ne 0
             $fresh = (([int]$a.productState) -band 0x10) -eq 0
             $isDef = ("$($a.displayName)" -match '(?i)Defender')
+            if (-not $isDef) {
+                # запись в Центре безопасности переживает удаление программы: проверяем, что её файл ещё существует
+                $avExe = Get-ExePath "$($a.pathToSignedProductExe)"
+                if ($avExe -and (Test-FullPath $avExe) -and -not (Test-DriveMissing $avExe) -and -not (Test-PathSafe $avExe 'Leaf')) {
+                    Add-Finding -Level WARN -Title "В Центре безопасности Windows числится антивирус, которого уже нет: $($a.displayName)" -Detail @("файл: $avExe (файла нет)", 'запись осталась от удалённой программы; из-за неё Windows может показывать, что компьютер защищает она') `
+                        -Fix $script:FixGhostAv -FixText 'удалить эту запись из Центра безопасности' -Data @{ Guid = "$($a.instanceGuid)"; Name = "$($a.displayName)" } -Explicit
+                    continue
+                }
+            }
             if (-not $isDef -and $on) { $script:ThirdAv += "$($a.displayName)" }
             if (-not $isDef) {
                 $st = 'выключен'; if ($on) { $st = 'включён' }
@@ -736,7 +755,9 @@ function Invoke-ProtectionChecks {
             else { Add-Finding -Level BAD -Title 'Defender не отвечает, и другого антивируса не видно' -Manual 'открыть "Безопасность Windows"; если не открывается - это признак заражения или поломки' }
             return
         }
-        $passive = ("$($mp.AMRunningMode)" -match '(?i)Passive') -or ($script:ThirdAv.Count -gt 0)
+        # о своём режиме Defender знает сам; список Центра безопасности бывает устаревшим
+        $mode = "$($mp.AMRunningMode)"
+        $passive = ($mode -match '(?i)Passive') -or ($mode -notmatch '(?i)Normal|EDR' -and $script:ThirdAv.Count -gt 0)
         if ($passive) {
             Add-Finding -Level INFO -Title "Defender в пассивном режиме, основной антивирус: $($script:ThirdAv -join ', ')"
         } else {
@@ -1193,7 +1214,7 @@ function Invoke-BrowserChecks {
                 $lj = Join-P $d.FullName 'logins.json'
                 if (Test-PathSafe $lj) {
                     $cnt = 0
-                    try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins).Count } catch { }
+                    try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins | Where-Object { $_.encryptedPassword }).Count } catch { }
                     if ($cnt -gt 0) { Add-Finding -Level INFO -Title "$tag - сохранённых паролей в браузере: $cnt" -Detail @('надёжнее держать пароли в менеджере паролей (KeePassXC), а не в браузере') }
                 }
             }
@@ -1550,6 +1571,7 @@ function Invoke-AutorunChecks {
             $exe = Get-ExePath "$($s.PathName)"
             $sg = Get-Signer $exe
             if (Test-MsSigned $sg) { continue }
+            if ($sg -eq 'no path') { continue }   # защищённые службы Windows путь не показывают - судить не о чем
             $det = @("файл: $exe ($(Get-SignerText $sg))", "запуск: $($s.StartMode); сейчас: $($s.State)")
             if (Test-DeadTarget "$($s.PathName)" "$exe" $sg) {
                 if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } -Explicit }
@@ -1673,22 +1695,35 @@ function Invoke-AccountChecks {
     }
 
     Invoke-Check 'программы удалённого доступа' {
-        $tools = @(Get-InstalledNames $script:RemoteToolsRx)
-        foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Name) $($_.DisplayName)" -match $script:RemoteToolsRx })) { $tools += "служба $($s.Name) ($($s.State))" }
-        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { "$($_.ProcessName)" -match $script:RemoteToolsRx } | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)) { $tools += "запущен процесс $p" }
-        $tools = @($tools | Sort-Object -Unique)
-        if ($tools.Count) {
-            Add-Finding -Level WARN -Title 'Установлены программы удалённого доступа' -Detail ($tools + @('через них компьютером управляют издалека; это главный инструмент телефонных мошенников')) -Manual 'оставить только то, что ставил сам и чем пользуешься; остальное удалить (Параметры > Приложения)'
-        } else { Add-Finding -Level OK -Title 'Программ удалённого доступа нет' }
+        $lines = @(Get-InstalledNames $script:RemoteToolsRx)
+        foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Name) $($_.DisplayName)" -match $script:RemoteToolsRx })) { $lines += "служба $($s.Name) ($($s.State))" }
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { "$($_.ProcessName)" -match $script:RemoteToolsRx } | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)) { $lines += "запущен процесс $p" }
+        # по одному пункту на программу, чтобы знакомую можно было занести в список «это нормально»
+        $byTool = @{}; $order = @()
+        foreach ($l in @($lines | Sort-Object -Unique)) {
+            $k = [regex]::Match($l, $script:RemoteToolsRx).Value
+            if (-not $byTool.ContainsKey($k)) { $byTool[$k] = @(); $order += $k }
+            $byTool[$k] += $l
+        }
+        foreach ($k in $order) {
+            if ($k -match '(?i)Tailscale|ZeroTier|Hamachi') {
+                Add-Finding -Level WARN -Title "Частная сеть с доступом к этому компьютеру: $k" -Detail ($byTool[$k] + @('связывает твои устройства напрямую; к компьютеру сможет подключиться тот, кто войдёт в твою учётную запись этой сети')) -Manual 'если ставил сам и пользуешься - оставить; иначе удалить (Параметры > Приложения)'
+            } else {
+                Add-Finding -Level WARN -Title "Программа удалённого доступа: $k" -Detail ($byTool[$k] + @('через неё компьютером управляют издалека; это главный инструмент телефонных мошенников')) -Manual 'если ставил сам и пользуешься - оставить; иначе удалить (Параметры > Приложения)'
+            }
+        }
+        if ($order.Count -eq 0) { Add-Finding -Level OK -Title 'Программ удалённого доступа нет' }
     }
 }
 
 # ================================================================ 8. ПРОГРАММЫ
+# известный навязанный софт (\b перед Torrent: qBittorrent сюда не относится)
+$script:PupRx = '(?i)(DriverPack|Driver Booster|Driver Easy|DriverMax|IObit|Advanced SystemCare|MediaGet|\bZona\b|\buTorrent|\bBitTorrent|Амиго|Amigo|Спутник@Mail|Mail\.Ru Агент|Агент Mail\.Ru|Guard@Mail|Кнопка .Яндекс|Менеджер браузеров|Browser Manager|Яндекс\.?\s?Элементы|WebAdvisor|ByteFence|Segurazo|PC Accelerate|OneLaunch|Wave Browser|PC App Store|Web Companion|Reimage|Restoro|MyCleanPC|Slimware|WinZip Driver|Avast Secure Browser|AVG Secure Browser|Opera GX Assistant|Hola VPN|TLauncher)'
 function Invoke-ProgramChecks {
     Start-Section 'Программы'
 
     Invoke-Check 'навязанные и нежелательные программы' {
-        $pup = @(Get-InstalledNames '(?i)(DriverPack|Driver Booster|Driver Easy|DriverMax|IObit|Advanced SystemCare|MediaGet|\bZona\b|uTorrent|BitTorrent|Амиго|Amigo|Спутник@Mail|Mail\.Ru Агент|Агент Mail\.Ru|Guard@Mail|Кнопка .Яндекс|Менеджер браузеров|Browser Manager|Яндекс\.?\s?Элементы|WebAdvisor|ByteFence|Segurazo|PC Accelerate|OneLaunch|Wave Browser|PC App Store|Web Companion|Reimage|Restoro|MyCleanPC|Slimware|WinZip Driver|Avast Secure Browser|AVG Secure Browser|Opera GX Assistant|Hola VPN|TLauncher)')
+        $pup = @(Get-InstalledNames $script:PupRx)
         if ($pup.Count) { Add-Finding -Level WARN -Title "Навязанные и нежелательные программы: $($pup.Count)" -Detail $pup -Manual 'удалить через Параметры > Приложения > Установленные приложения' }
         else { Add-Finding -Level OK -Title 'Известных навязанных программ нет' }
     }
@@ -1716,7 +1751,7 @@ $script:PromoMs = @(
 # предустановленные игры и приложения сторонних фирм: ими могли пользоваться, внутри могут быть свои данные - только по номеру
 $script:PromoThird = @(
     'Clipchamp.Clipchamp', 'MicrosoftTeams', '7EE7776C.LinkedInforWindows', 'king.com.*', '*.TikTok', 'Facebook.*', 'Disney.*', 'AmazonVideo.PrimeVideo',
-    '*CandyCrush*', '*BubbleWitch*', '*.Netflix', '*HiddenCity*', '*MarchofEmpires*', '*.Twitter', 'SpotifyAB.SpotifyMusic'
+    '*CandyCrush*', '*BubbleWitch*', '*.Netflix', '*HiddenCity*', '*MarchofEmpires*', '*.Twitter'
 )
 function Test-NameLike { param([string]$Name, [string[]]$Patterns) foreach ($pat in $Patterns) { if ($Name -like $pat) { return $true } }; return $false }
 

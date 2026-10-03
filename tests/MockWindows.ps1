@@ -137,9 +137,10 @@ function Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$Cla
     switch ($ClassName) {
         'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Microsoft Windows 10 Home' } }
         'SoftwareLicensingProduct' { [pscustomobject]@{ LicenseStatus = 1; Description = 'Windows(R) Operating System, VOLUME_KMSCLIENT channel'; GracePeriodRemaining = 180000 } }
-        'AntiVirusProduct' { [pscustomobject]@{ displayName = 'Windows Defender'; productState = 397568 } }
+        'AntiVirusProduct' { [pscustomobject]@{ displayName = 'Windows Defender'; productState = 397568; pathToSignedProductExe = 'windowsdefender://'; instanceGuid = '{D}' }; if (-not $Clean -and -not $global:S.GhostGone) { [pscustomobject]@{ displayName = 'Old Antivirus'; productState = 266240; pathToSignedProductExe = 'C:\Gone\av\wsc_proxy.exe'; instanceGuid = '{G}' } } }
         'FirewallProduct' { }
         'Win32_Service' {
+            [pscustomobject]@{ Name = 'WaaSMedicSvc'; DisplayName = 'Protected'; PathName = $null; StartMode = 'Manual'; State = 'Stopped' }
             [pscustomobject]@{ Name = 'Dnscache'; DisplayName = 'DNS'; PathName = 'C:\Windows\System32\svchost.exe -k NetworkService'; StartMode = 'Auto'; State = 'Running' }
             [pscustomobject]@{ Name = 'VendorSvc'; DisplayName = 'Vendor'; PathName = '"C:\Program Files\Vendor\svc.exe" --key=SECRETSECRETSECRETSECRETSECRETSECRET1234'; StartMode = 'Auto'; State = 'Running' }
             if (-not $Clean) {
@@ -153,8 +154,9 @@ function Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$Cla
         default { throw "fake: unexpected class $ClassName" }
     }
 }
+function Remove-CimInstance { [CmdletBinding()] param($InputObject) $global:S.GhostGone = $true }
 function Get-HotFix { [CmdletBinding()] param() $d = (Get-Date).AddDays(-130); if ($Clean) { $d = (Get-Date).AddDays(-5) }; [pscustomobject]@{ HotFixID = 'KB5000001'; InstalledOn = $d } }
-function Get-PhysicalDisk { [pscustomobject]@{ DeviceId = 0; FriendlyName = 'SSD One'; MediaType = 'SSD'; Size = 500GB; HealthStatus = 'Healthy'; W = 50 }; if (-not $Clean) { [pscustomobject]@{ DeviceId = 1; FriendlyName = 'Old HDD'; MediaType = 'HDD'; Size = 1000GB; HealthStatus = 'Warning'; W = $null } } }
+function Get-PhysicalDisk { [pscustomobject]@{ DeviceId = 0; FriendlyName = 'SSD One'; MediaType = 'SSD'; Size = 500GB; HealthStatus = 'Healthy'; W = 0 }; if (-not $Clean) { [pscustomobject]@{ DeviceId = 1; FriendlyName = 'Old HDD'; MediaType = 'HDD'; Size = 1000GB; HealthStatus = 'Warning'; W = $null } } }
 function Get-StorageReliabilityCounter { [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$d) process { [pscustomobject]@{ Wear = $d.W; Temperature = 40; PowerOnHours = 12000; ReadErrorsUncorrected = 0; WriteErrorsUncorrected = 0 } } }
 function Get-Volume { [pscustomobject]@{ DriveLetter = 'C'; DriveType = 'Fixed'; Size = 400GB; SizeRemaining = $(if ($Clean) { 200GB } else { 6GB }); HealthStatus = 'Healthy' }; [pscustomobject]@{ DriveLetter = $null; DriveType = 'Fixed'; Size = 1GB; SizeRemaining = 1GB; HealthStatus = 'Healthy' } }
 function Get-BitLockerVolume { [CmdletBinding()] param() throw 'not available' }
