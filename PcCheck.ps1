@@ -50,6 +50,12 @@ function Join-P {
     if ($script:IsWin -or $Parent -match '\\') { return ($Parent.TrimEnd('\') + '\' + $Child.TrimStart('\')) }
     return [IO.Path]::Combine($Parent, $Child)
 }
+function Test-PathSafe {
+    # Test-Path, который не падает на кривых путях (кавычки, запрещённые символы, отсутствующий диск)
+    param([string]$Path, [string]$PathType = 'Any')
+    if (-not $Path) { return $false }
+    try { return [bool](Test-Path -LiteralPath $Path -PathType $PathType -ErrorAction Stop) } catch { return $false }
+}
 function Test-Admin {
     if (-not $script:IsWin) { return $false }
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -179,7 +185,7 @@ function Show-Finding {
 
 # ---------------------------------------------------------------- резервные копии и журнал
 function Get-BackupDir {
-    if (-not (Test-Path -LiteralPath $script:BackupDir)) { New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null }
+    if (-not (Test-PathSafe $script:BackupDir)) { New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null }
     return $script:BackupDir
 }
 function Add-BackupLine {
@@ -195,7 +201,7 @@ function Add-Change {
 function Backup-File {
     param([string]$Path)
     $dir = Join-P (Get-BackupDir) 'files'
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not (Test-PathSafe $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $n = @(Get-ChildItem -LiteralPath $dir -Force).Count + 1
     $dst = Join-P $dir ('{0:d3}_{1}' -f $n, (Split-Path $Path -Leaf))
     Copy-Item -LiteralPath $Path -Destination $dst -Force
@@ -212,14 +218,15 @@ function ConvertTo-NativeRegPath {
 }
 function Export-RegKey {
     param([string]$Path, [string]$FileName)
+    $ErrorActionPreference = 'Continue'
     $dst = Join-P (Get-BackupDir) $FileName
-    & reg.exe export (ConvertTo-NativeRegPath $Path) $dst /y 2>&1 | Out-Null
+    try { & reg.exe export (ConvertTo-NativeRegPath $Path) $dst /y 2>$null | Out-Null } catch { }
     return $dst
 }
 function Get-RegValue {
     param([string]$Path, [string]$Name)
     try {
-        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        if (-not (Test-PathSafe $Path)) { return $null }
         $k = Get-Item -LiteralPath $Path -ErrorAction Stop
         if ($k.GetValueNames() -contains $Name) { return $k.GetValue($Name, $null, 'DoNotExpandEnvironmentNames') }
     } catch { }
@@ -229,7 +236,7 @@ function Backup-RegValue {
     param([string]$Path, [string]$Name)
     $cur = '(absent)'; $kind = ''
     try {
-        if (Test-Path -LiteralPath $Path) {
+        if (Test-PathSafe $Path) {
             $k = Get-Item -LiteralPath $Path -ErrorAction Stop
             if ($k.GetValueNames() -contains $Name) {
                 $v = $k.GetValue($Name, $null, 'DoNotExpandEnvironmentNames'); $kind = "$($k.GetValueKind($Name))"
@@ -243,7 +250,7 @@ function Backup-RegValue {
 function Set-RegValueSafe {
     param([string]$Path, [string]$Name, $Value, [string]$Type = 'DWord')
     $old = Backup-RegValue $Path $Name
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+    if (-not (Test-PathSafe $Path)) { New-Item -Path $Path -Force | Out-Null }
     New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
     Add-Change 'registry set' "$(ConvertTo-NativeRegPath $Path)`t$Name`t$old -> $Value"
 }
@@ -261,7 +268,7 @@ function Get-Signer {
     if (-not $Path) { return 'no path' }
     if ($script:SigCache.ContainsKey($Path)) { return $script:SigCache[$Path] }
     $r = 'FILE NOT FOUND'
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    if (Test-PathSafe $Path -PathType Leaf) {
         try {
             $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
             $r = "$($s.Status)"
@@ -315,7 +322,7 @@ function Get-ExePath {
 function Test-FullPath { param([string]$Path) return ($Path -match '^[A-Za-z]:\\') }
 function Test-DriveMissing {
     param([string]$Path)
-    if ($Path -match '^([A-Za-z]:\\)') { return (-not (Test-Path -LiteralPath $matches[1])) }
+    if ($Path -match '^([A-Za-z]:\\)') { return (-not (Test-PathSafe $matches[1])) }
     return $false
 }
 function Test-UserWritablePath {
@@ -367,7 +374,7 @@ function Get-RunContext {
         $u = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName
         if ($u) {
             $sid = (New-Object Security.Principal.NTAccount($u)).Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($sid -and $sid -ne $ctx.CurrentSid -and (Test-Path -LiteralPath "Registry::HKEY_USERS\$sid")) { $ctx.MainSid = $sid; $ctx.MainName = "$u"; $ctx.Differs = $true }
+            if ($sid -and $sid -ne $ctx.CurrentSid -and (Test-PathSafe "Registry::HKEY_USERS\$sid")) { $ctx.MainSid = $sid; $ctx.MainName = "$u"; $ctx.Differs = $true }
         }
     } catch { }
     $ctx.MainHive = "Registry::HKEY_USERS\$($ctx.MainSid)"
@@ -391,7 +398,7 @@ function Get-AllProfiles {
     foreach ($k in @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue)) {
         if ($k.PSChildName -notmatch '^S-1-(5-21|12-1)-[\d-]+$') { continue }
         $p = Get-UserProfilePath $k.PSChildName
-        if ($p -and (Test-Path -LiteralPath $p)) { $list += [pscustomobject]@{ Sid = $k.PSChildName; Profile = $p; Name = (Split-Path $p -Leaf) } }
+        if ($p -and (Test-PathSafe $p)) { $list += [pscustomobject]@{ Sid = $k.PSChildName; Profile = $p; Name = (Split-Path $p -Leaf) } }
     }
     return $list
 }
@@ -532,7 +539,7 @@ function Invoke-SystemChecks {
         $kmsO = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\OfficeSoftwareProtectionPlatform' 'KeyManagementServiceName'
         if ($kmsO) { $det += "Office настроен на KMS-сервер: $kmsO" }
         foreach ($p in @('C:\Windows\AAct_Tools', 'C:\Windows\KMSAutoS', 'C:\ProgramData\KMSAutoS', 'C:\ProgramData\KMSAuto', 'C:\Program Files\KMSpico', 'C:\Windows\SECOH-QAD.exe', 'C:\ProgramData\Online_KMS_Activation')) {
-            if (Test-Path -LiteralPath $p) { $det += "след активатора: $p" }
+            if (Test-PathSafe $p) { $det += "след активатора: $p" }
         }
         foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { "$($_.TaskName)$($_.TaskPath)" -match '(?i)AAct|KMSAuto|KMSpico|KMS_VL|Activation-Renewal|Online_KMS|SvcRestartTask_KMS' })) { $det += "задача активатора: $($t.TaskPath)$($t.TaskName)" }
         $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -686,7 +693,7 @@ function Invoke-ProtectionChecks {
             foreach ($v in @($k.V | Where-Object { $_ })) {
                 $n++
                 $dead = $false
-                if ($k.K -eq 'Path' -and (Test-FullPath "$v") -and -not (Test-DriveMissing "$v") -and -not (Test-Path -LiteralPath "$v")) { $dead = $true }
+                if ($k.K -eq 'Path' -and "$v" -notmatch '[*?%]' -and (Test-FullPath "$v") -and -not (Test-DriveMissing "$v") -and -not (Test-PathSafe "$v")) { $dead = $true }
                 if ($dead) {
                     Add-Finding -Level WARN -Title "Исключение Defender на несуществующий путь: $v" -Fix $script:FixExclusion -FixText 'убрать исключение' -Data @{ Kind = $k.K; Value = "$v" }
                 } else {
@@ -934,11 +941,11 @@ $script:FixRemoveCert = {
     param($f)
     $d = $f.Data
     $dir = Join-P (Get-BackupDir) 'certs'
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not (Test-PathSafe $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     [IO.File]::WriteAllBytes((Join-P $dir "$($d.Store)_$($d.Thumb).cer"), $d.Der)
     $n = 0
     foreach ($kp in $d.RegPaths) {
-        if (Test-Path -LiteralPath $kp) {
+        if (Test-PathSafe $kp) {
             Export-RegKey $kp "certs\$($d.Store)_$($d.Thumb)_$n.reg" | Out-Null
             Remove-Item -LiteralPath $kp -Recurse -Force
             Add-Change 'certificate removed' "$($d.Subject)`t$($d.Thumb)`t$(ConvertTo-NativeRegPath $kp)"
@@ -1033,7 +1040,7 @@ $script:FixFirefoxRoots = {
     param($f)
     $uj = Join-P $f.Data.Profile 'user.js'
     $lines = @()
-    if (Test-Path -LiteralPath $uj) {
+    if (Test-PathSafe $uj) {
         Backup-File $uj | Out-Null
         $lines = @(Get-Content -LiteralPath $uj -Encoding UTF8 | Where-Object { $_ -notmatch 'security\.enterprise_roots\.enabled' })
     }
@@ -1047,7 +1054,7 @@ $script:FixMoveFile = {
     if ($f.Data.NeedClosed -and @(Get-Process -Name $f.Data.NeedClosed -ErrorAction SilentlyContinue).Count) { throw "сначала закрой программу $($f.Data.NeedClosed) и запусти проверку ещё раз" }
     $n = 0
     foreach ($p in @($f.Data.Paths)) {
-        if (Test-Path -LiteralPath $p) {
+        if (Test-PathSafe $p) {
             $dst = Backup-File $p
             Remove-Item -LiteralPath $p -Force
             Add-Change 'file removed' "$p`tкопия: $dst"
@@ -1068,13 +1075,13 @@ function Invoke-BrowserChecks {
             $root = Join-P $up.Profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
             foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
                 $prefs = Join-P $d.FullName 'prefs.js'
-                if (-not (Test-Path -LiteralPath $prefs)) { continue }
+                if (-not (Test-PathSafe $prefs)) { continue }
                 $found++
                 $tag = "Firefox, профиль $($d.Name) ($($up.Name))"
                 $state = $null
                 foreach ($pf in @('prefs.js', 'user.js')) {
                     $fp = Join-P $d.FullName $pf
-                    if (Test-Path -LiteralPath $fp) {
+                    if (Test-PathSafe $fp) {
                         $m = Select-String -LiteralPath $fp -Pattern 'user_pref\("security\.enterprise_roots\.enabled",\s*(true|false)\)' -ErrorAction SilentlyContinue | Select-Object -Last 1
                         if ($m) { $state = $m.Matches[0].Groups[1].Value }
                     }
@@ -1087,7 +1094,7 @@ function Invoke-BrowserChecks {
                         -Fix $script:FixFirefoxRoots -FixText 'выключить это доверие (строка в user.js профиля)' -Data @{ Profile = $d.FullName }
                 }
                 $db = Join-P $d.FullName 'cert9.db'
-                if (Test-Path -LiteralPath $db) {
+                if (Test-PathSafe $db) {
                     $txt = ''
                     try {
                         $fs = New-Object IO.FileStream($db, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
@@ -1104,7 +1111,7 @@ function Invoke-BrowserChecks {
                     }
                 }
                 $lj = Join-P $d.FullName 'logins.json'
-                if (Test-Path -LiteralPath $lj) {
+                if (Test-PathSafe $lj) {
                     $cnt = 0
                     try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins).Count } catch { }
                     if ($cnt -gt 0) { Add-Finding -Level INFO -Title "$tag - сохранённых паролей в браузере: $cnt" -Detail @('надёжнее держать пароли в менеджере паролей (KeePassXC), а не в браузере') }
@@ -1116,10 +1123,10 @@ function Invoke-BrowserChecks {
 
     Invoke-Check 'Firefox: чужие файлы настроек в папке программы' {
         $dirs = @('C:\Program Files\Mozilla Firefox', 'C:\Program Files (x86)\Mozilla Firefox', 'C:\Program Files\Firefox Developer Edition', 'C:\Program Files\Firefox Nightly')
-        foreach ($p in @($script:Programs | Where-Object { $_.Name -match '(?i)Firefox' -and $_.Location })) { $dirs += $p.Location.TrimEnd('\') }
+        foreach ($p in @($script:Programs | Where-Object { $_.Name -match '(?i)Firefox' -and $_.Location })) { $dirs += $p.Location.Trim('"').TrimEnd('\') }
         $kasper = Test-Installed '(?i)Kaspersky|Касперск'
         foreach ($base in @($dirs | Sort-Object -Unique)) {
-            if (-not (Test-Path -LiteralPath (Join-P $base 'firefox.exe'))) { continue }
+            if (-not (Test-PathSafe (Join-P $base 'firefox.exe'))) { continue }
             $extra = @()
             $extra += @(Get-ChildItem -LiteralPath (Join-P $base 'defaults\pref') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'channel-prefs.js' })
             $extra += @(Get-ChildItem -LiteralPath $base -File -Force -Filter '*.cfg' -ErrorAction SilentlyContinue)
@@ -1145,7 +1152,7 @@ function Invoke-BrowserChecks {
 
     Invoke-Check 'браузеры с собственным списком доверенных сертификатов' {
         $ya = @(Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom')
-        foreach ($up in $profiles) { if (Test-Path -LiteralPath (Join-P $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
+        foreach ($up in $profiles) { if (Test-PathSafe (Join-P $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
         $ya = @($ya | Sort-Object -Unique)
         if ($ya.Count) {
             Add-Finding -Level INFO -Title 'Установлен браузер с собственным списком доверенных сертификатов' -Detail ($ya + @('он доверяет дополнительным корневым сертификатам независимо от хранилища Windows - проверка хранилища на него не распространяется'))
@@ -1154,7 +1161,7 @@ function Invoke-BrowserChecks {
 
     Invoke-Check 'политики, управляющие Chrome и Edge' {
         foreach ($pp in @('HKLM:\SOFTWARE\Policies\Google\Chrome', "$($script:Ctx.MainHive)\Software\Policies\Google\Chrome", "$($script:Ctx.MainHive)\Software\Policies\Microsoft\Edge")) {
-            if (-not (Test-Path -LiteralPath $pp)) { continue }
+            if (-not (Test-PathSafe $pp)) { continue }
             $names = @((Get-Item -LiteralPath $pp).GetValueNames() | Where-Object { $_ })
             $sub = @(Get-ChildItem -LiteralPath $pp -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
             if ($names.Count + $sub.Count -gt 0) {
@@ -1219,7 +1226,7 @@ function Invoke-NetworkChecks {
     Start-Section 'Сеть'
 
     Invoke-Check 'файл hosts' {
-        if (-not (Test-Path -LiteralPath $script:HostsPath)) { Add-Finding -Level INFO -Title 'Файла hosts нет (это допустимо)'; return }
+        if (-not (Test-PathSafe $script:HostsPath)) { Add-Finding -Level INFO -Title 'Файла hosts нет (это допустимо)'; return }
         $entries = @(Get-HostsEntries @(Get-Content -LiteralPath $script:HostsPath))
         $g = @{ SECURITY = @(); REDIRECT = @(); LICENSE = @(); BLOCK = @(); LOCAL = @() }
         foreach ($e in $entries) { $g[(Get-HostsVerdict $e)] += $e }
@@ -1290,7 +1297,7 @@ $script:FixRemoveRunValue = {
 $script:FixRemoveTask = {
     param($f)
     $dir = Join-P (Get-BackupDir) 'tasks'
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not (Test-PathSafe $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $safe = ("$($f.Data.TaskPath)$($f.Data.TaskName)" -replace '[\\/:*?"<>|]', '_')
     (Export-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName) | Out-File -FilePath (Join-P $dir "$safe.xml") -Encoding unicode
     if ($f.Data.DisableOnly) {
@@ -1307,9 +1314,10 @@ $script:FixDeleteService = {
     param($f)
     $name = "$($f.Data.Name)"
     $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
-    if (Test-Path -LiteralPath $key) { Export-RegKey $key ("service_" + ($name -replace '[^\w.-]', '_') + '.reg') | Out-Null }
-    $o = & sc.exe delete $name 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "sc delete: $(($o | Where-Object { $_ }) -join ' ')" }
+    if (Test-PathSafe $key) { Export-RegKey $key ("service_" + ($name -replace '[^\w.-]', '_') + '.reg') | Out-Null }
+    $ErrorActionPreference = 'Continue'
+    $o = & sc.exe delete $name
+    if ($LASTEXITCODE -ne 0) { throw "sc delete (код $LASTEXITCODE): $((@($o) | Where-Object { $_ }) -join ' ')" }
     Add-Change 'service deleted' $name
     return 'запись службы удалена (копия ветки реестра в backup); окончательно исчезнет после перезагрузки'
 }
@@ -1332,7 +1340,7 @@ function Invoke-AutorunChecks {
         }
         $fine = @(); $flag = 0
         foreach ($k in $keys) {
-            if (-not (Test-Path -LiteralPath $k.P)) { continue }
+            if (-not (Test-PathSafe $k.P)) { continue }
             $item = Get-Item -LiteralPath $k.P
             foreach ($n in $item.GetValueNames()) {
                 if (-not $n) { continue }
@@ -1877,7 +1885,7 @@ function Initialize-RunFolder {
             $script:BackupDir = Join-P $run 'backup'
             $script:JournalFile = Join-P $base "${name}_changes.tsv"
             $ig = Join-P $base "${name}_ignore.txt"
-            if (Test-Path -LiteralPath $ig) { $script:IgnoreList = @(Get-Content -LiteralPath $ig -Encoding UTF8 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch '^#' }) }
+            if (Test-PathSafe $ig) { $script:IgnoreList = @(Get-Content -LiteralPath $ig -Encoding UTF8 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch '^#' }) }
             return
         } catch { }
     }
@@ -1941,8 +1949,8 @@ function Invoke-Main {
     }
     Out-Line ''
     Out-Line "  Отчёт:   $script:ReportFile" 'Cyan'
-    if (Test-Path -LiteralPath $script:BackupDir) { Out-Line "  Копии:   $script:BackupDir" 'Cyan' }
-    if (Test-Path -LiteralPath $script:JournalFile) { Out-Line "  Журнал:  $script:JournalFile" 'Cyan' }
+    if (Test-PathSafe $script:BackupDir) { Out-Line "  Копии:   $script:BackupDir" 'Cyan' }
+    if (Test-PathSafe $script:JournalFile) { Out-Line "  Журнал:  $script:JournalFile" 'Cyan' }
     Save-Report
 }
 
