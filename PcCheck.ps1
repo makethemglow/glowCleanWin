@@ -83,6 +83,17 @@ if ($script:IsWin -and -not $LoadOnly -and -not $Demo -and -not $Relaunched) {
     }
 }
 
+if ($script:IsWin -and -not $LoadOnly -and -not $Demo) {
+    $why = ''
+    if (-not (Test-Admin)) { $why = 'нет прав администратора' }
+    elseif ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { $why = 'запущена 32-битная версия PowerShell' }
+    if ($why) {
+        Write-Host "Проверка не запущена: $why. Запусти PcCheck.cmd двойным щелчком из Проводника." -ForegroundColor Red
+        if (-not $NoPause) { [void](Read-Host 'Нажми Enter') }
+        return
+    }
+}
+
 # ---------------------------------------------------------------- общее состояние
 $script:Findings = New-Object System.Collections.ArrayList
 $script:Report = New-Object System.Text.StringBuilder
@@ -197,7 +208,8 @@ function Add-Change {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`t$Type`t$What"
     if ($script:DemoMode) { return }
     try { [IO.File]::AppendAllText($script:JournalFile, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false))) } catch { }
-    Out-ReportOnly "       журнал: $Type | $What"
+    # в отчёт - только что и где; сами значения (в них бывают ключи) остаются в журнале и в backup
+    Out-ReportOnly "       журнал: $Type | $(Hide-Secrets ((@($What -split "`t") | Select-Object -First 2) -join ' | ') 200)"
 }
 function Backup-File {
     param([string]$Path)
@@ -248,10 +260,39 @@ function Backup-RegValue {
     Add-BackupLine 'registry_before.tsv' "$(ConvertTo-NativeRegPath $Path)`t$Name`t$kind`t$cur"
     return $cur
 }
+function Open-RegRoot {
+    # возвращает @(корневой раздел .NET, путь под ним); работает мимо провайдера PowerShell, без подстановочных знаков
+    param([string]$Path)
+    $native = ConvertTo-NativeRegPath $Path
+    $i = $native.IndexOf('\')
+    if ($i -lt 1) { throw "не разобрал путь реестра: $Path" }
+    $hive = $native.Substring(0, $i); $sub = $native.Substring($i + 1)
+    $root = $null
+    switch ($hive) {
+        'HKEY_LOCAL_MACHINE' { $root = [Microsoft.Win32.Registry]::LocalMachine }
+        'HKEY_USERS' { $root = [Microsoft.Win32.Registry]::Users }
+        'HKEY_CURRENT_USER' { $root = [Microsoft.Win32.Registry]::CurrentUser }
+        default { throw "неожиданный куст реестра: $hive" }
+    }
+    return @($root, $sub)
+}
+function New-RegKeyRaw {
+    # CreateSubKey открывает существующий раздел, ничего в нём не стирая (в отличие от New-Item -Force)
+    param([string]$Path)
+    $r = Open-RegRoot $Path
+    $k = $r[0].CreateSubKey($r[1]); $k.Close()
+}
+function Remove-RegValueRaw {
+    param([string]$Path, [string]$Name)
+    $r = Open-RegRoot $Path
+    $k = $r[0].OpenSubKey($r[1], $true)
+    if ($null -eq $k) { return }
+    try { $k.DeleteValue($Name, $false) } finally { $k.Close() }
+}
 function Set-RegValueSafe {
     param([string]$Path, [string]$Name, $Value, [string]$Type = 'DWord')
     $old = Backup-RegValue $Path $Name
-    if (-not (Test-PathSafe $Path)) { New-Item -Path $Path -Force | Out-Null }
+    New-RegKeyRaw $Path
     New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
     Add-Change 'registry set' "$(ConvertTo-NativeRegPath $Path)`t$Name`t$old -> $Value"
 }
@@ -259,7 +300,7 @@ function Remove-RegValueSafe {
     param([string]$Path, [string]$Name)
     $old = Backup-RegValue $Path $Name
     if ($old -eq '(absent)') { return }
-    Remove-ItemProperty -LiteralPath $Path -Name $Name -Force
+    Remove-RegValueRaw $Path $Name
     Add-Change 'registry value removed' "$(ConvertTo-NativeRegPath $Path)`t$Name`t$old"
 }
 
@@ -311,17 +352,21 @@ function Get-ExePath {
         $c = $c -replace '^(?i)system32\\', ($env:SystemRoot + '\System32\')
     }
     $p = $null
-    if ($c -match '^"([^"]+)"') { $p = $matches[1] }
-    elseif ($c -match '^(.+?\.(exe|dll|sys|cmd|bat|ps1|vbs|vbe|js|jse|wsf|com|scr|hta|msi|lnk))(\s|,|$)') { $p = $matches[1] }
-    else {
-        # путь без кавычек и без расширения: как сама Windows, пробуем всё более длинные куски до пробела
+    if ($c -match '^"([^"]+)"') {
+        $p = $matches[1]
+        if (-not (Test-PathSafe $p 'Leaf') -and (Test-PathSafe "$p.exe" 'Leaf')) { $p = "$p.exe" }
+    } else {
+        # путь без кавычек: как сама Windows, пробуем всё более длинные куски до пробела и берём первый существующий файл
         $parts = @($c -split ' '); $acc = ''
         foreach ($part in $parts) {
             $acc = ("$acc $part").TrimStart()
-            if ($acc -match '[\\/]' -and (Test-PathSafe $acc 'Leaf')) { $p = $acc; break }
-            if ($acc -match '[\\/]' -and (Test-PathSafe "$acc.exe" 'Leaf')) { $p = "$acc.exe"; break }
+            if (-not $part -or $acc -notmatch '[\\/]') { continue }
+            if (Test-PathSafe $acc 'Leaf') { $p = $acc; break }
+            if (Test-PathSafe "$acc.exe" 'Leaf') { $p = "$acc.exe"; break }
         }
-        if (-not $p) { $p = $parts[0] }
+        if (-not $p) {
+            if ($c -match '^(.+?\.(exe|dll|sys|cmd|bat|ps1|vbs|vbe|js|jse|wsf|com|scr|hta|msi|lnk))(\s|,|$)') { $p = $matches[1] } else { $p = $parts[0] }
+        }
     }
     if ($p -and ($p -notmatch '[\\/]')) {
         $g = Get-Command $p -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -334,6 +379,22 @@ function Test-DriveMissing {
     param([string]$Path)
     if ($Path -match '^([A-Za-z]:\\)') { return (-not (Test-PathSafe $matches[1])) }
     return $false
+}
+function Test-DeadTarget {
+    # "файла нет" считаем доказанным, только когда ошибиться негде
+    param([string]$Raw, [string]$Exe, [string]$Signer)
+    if ($Signer -ne 'FILE NOT FOUND') { return $false }
+    if (-not (Test-FullPath $Exe)) { return $false }
+    if (Test-DriveMissing $Exe) { return $false }
+    if ("$Raw" -match '%') { return $false }                       # переменная могла раскрыться не для того пользователя
+    if ($Exe -match '(?i)\\WindowsApps\\') { return $false }       # приложения из Store администратору не видны
+    $dir = ''
+    try { $dir = [IO.Path]::GetDirectoryName($Exe) } catch { return $false }
+    if ($dir -and (Test-PathSafe $dir)) {
+        # папка есть, а заглянуть в неё нельзя - значит, про файл мы ничего не знаем
+        try { $null = Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop | Select-Object -First 1 } catch { return $false }
+    }
+    return $true
 }
 function Test-UserWritablePath {
     param([string]$Path)
@@ -351,6 +412,8 @@ function Get-CommandRisk {
 function Hide-Secrets {
     param([string]$Text, [int]$Max = 160)
     $t = "$Text" -replace '\s+', ' '
+    $t = [regex]::Replace($t, '(?i)(password|passwd|pass|pwd|token|secret|key)([ =:]+)(\S+)', '$1$2[скрыто]')
+    $t = [regex]::Replace($t, '(://)[^/\s:@]+:[^/\s@]+@', '$1[скрыто]@')
     $t = [regex]::Replace($t, '[A-Za-z0-9+/=_\-]{28,}', '[скрыто]')
     if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) + '...' }
     return $t
@@ -441,7 +504,7 @@ function Invoke-SystemChecks {
         $os = Get-CimInstance Win32_OperatingSystem
         $build = [int]$cv.CurrentBuild
         $ver = "$($os.Caption) $($cv.DisplayVersion), сборка $build.$($cv.UBR)"
-        if ($build -lt 19045) {
+        if ($build -lt 17763) {
             Add-Finding -Level BAD -Title "Очень старая Windows без обновлений безопасности: $ver" -Manual 'обновить Windows до актуальной версии (Параметры > Центр обновления) или переустановить'
         } elseif ($build -lt 22000) {
             Add-Finding -Level WARN -Title "Windows 10: поддержка закончилась 14.10.2025 ($ver)" -Detail @('обновления безопасности приходят только по платной/временной программе ESU') -Manual 'перейти на Windows 11, если железо позволяет, или подключить ESU'
@@ -506,8 +569,10 @@ function Invoke-SystemChecks {
                 if ($r.WriteErrorsUncorrected) { $parts += "неисправленных ошибок записи: $($r.WriteErrorsUncorrected)" }
                 if ($parts.Count) { $det += ($parts -join ', ') }
             }
-            if ("$($d.HealthStatus)" -ne 'Healthy') {
+            if ("$($d.HealthStatus)" -match '(?i)Unhealthy|Warning') {
                 Add-Finding -Level BAD -Title "Диск сообщает о проблемах: $name - $($d.HealthStatus)" -Detail $det -Manual 'СРАЗУ сделать копию важных файлов на другой диск, потом менять диск'
+            } elseif ("$($d.HealthStatus)" -ne 'Healthy') {
+                Add-Finding -Level INFO -Title "Диск не сообщает о своём здоровье: $name - $($d.HealthStatus)" -Detail $det
             } elseif ($r -and $null -ne $r.Wear -and $r.Wear -ge 90) {
                 Add-Finding -Level BAD -Title "SSD почти выработал ресурс: $name" -Detail $det -Manual 'сделать копию данных и планировать замену диска'
             } elseif ($r -and $null -ne $r.Wear -and $r.Wear -ge 70) {
@@ -589,6 +654,7 @@ $script:FixPua = {
 $script:FixExclusion = {
     param($f)
     $v = $f.Data.Value
+    Add-BackupLine 'defender_exclusions_removed.tsv' "$($f.Data.Kind)`t$v"
     switch ($f.Data.Kind) {
         'Path' { Remove-MpPreference -ExclusionPath $v }
         'Process' { Remove-MpPreference -ExclusionProcess $v }
@@ -707,7 +773,7 @@ function Invoke-ProtectionChecks {
                 if ($dead) {
                     Add-Finding -Level WARN -Title "Исключение Defender на несуществующий путь: $v" -Fix $script:FixExclusion -FixText 'убрать исключение' -Data @{ Kind = $k.K; Value = "$v" }
                 } else {
-                    Add-Finding -Level BAD -Title "Исключение Defender ($($k.T)): $v" -Detail @('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') -Fix $script:FixExclusion -FixText 'убрать исключение (файлы не трогаются; Defender может потом сам удалить то, что там найдёт)' -Data @{ Kind = $k.K; Value = "$v" }
+                    Add-Finding -Level BAD -Title "Исключение Defender ($($k.T)): $v" -Detail @('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') -Fix $script:FixExclusion -FixText 'убрать исключение (файлы не трогаются; Defender может потом сам удалить то, что там найдёт; вернуть: Add-MpPreference, список в backup)' -Data @{ Kind = $k.K; Value = "$v" }
                 }
             }
         }
@@ -836,6 +902,7 @@ function Get-DerCommonNames {
     }
     return @($names.Keys)
 }
+$script:ESignRx = '(?i)КриптоПро|CryptoPro|ViPNet|Lissi|Signal-COM|Плагин пользователя систем электронного|IFCPlugin|Рутокен|Rutoken|JaCarta|Контур\.?(Плагин|Диагностик)|Kontur\.Plugin'
 # корневые сертификаты программ, которые вскрывают HTTPS. App = как называется программа в списке установленных
 $script:MitmRoots = @(
     @{ Rx = '(?i)Kaspersky|Касперск'; App = '(?i)Kaspersky|Касперск'; Name = 'Kaspersky'; Dev = $false; Always = $false },
@@ -870,9 +937,10 @@ function ConvertFrom-CertBlob {
     $i = 0
     while ($i + 12 -le $Blob.Length) {
         $id = [BitConverter]::ToUInt32($Blob, $i)
-        $len = [int][BitConverter]::ToUInt32($Blob, $i + 8)
+        $len = [long][BitConverter]::ToUInt32($Blob, $i + 8)
         $i += 12
-        if ($len -lt 0 -or $i + $len -gt $Blob.Length) { break }
+        if ($i + $len -gt $Blob.Length) { break }
+        $len = [int]$len
         if ($id -eq 32) {
             $der = New-Object byte[] $len
             [Array]::Copy($Blob, $i, $der, 0, $len)
@@ -1014,10 +1082,10 @@ function Invoke-CertificateChecks {
                 $inst = $false; if ($hit.App) { $inst = Test-Installed $hit.App }
                 if ($hit.Always) {
                     Add-Finding -Level BAD -Title "Корневой сертификат рекламного/шпионского ПО: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data
-                } elseif (-not $inst) {
-                    Add-Finding -Level BAD -Title "Корневой сертификат от удалённой программы ($($hit.Name)): $name" -Detail ((Get-CertLines $e) + @('программы уже нет, а её сертификат для вскрытия HTTPS остался доверенным')) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data
                 } elseif ($hit.Dev) {
                     Add-Finding -Level WARN -Title "Корневой сертификат инструмента перехвата трафика ($($hit.Name)): $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit
+                } elseif (-not $inst) {
+                    Add-Finding -Level BAD -Title "Корневой сертификат от удалённой программы ($($hit.Name)): $name" -Detail ((Get-CertLines $e) + @('программы уже нет, а её сертификат для вскрытия HTTPS остался доверенным')) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data
                 } else {
                     Add-Finding -Level INFO -Title "Корневой сертификат установленной программы $($hit.Name): $name" -Detail @('программа с его помощью просматривает HTTPS-трафик; исчезнет вместе с программой')
                 }
@@ -1035,12 +1103,12 @@ function Invoke-CertificateChecks {
                 Add-Finding -Level WARN -Title "Незнакомый корневой сертификат: $($u.Name)" -Detail (Get-CertLines $u.E) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $u.Data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
             }
         }
-        if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов вне программ доверия Microsoft и Mozilla в доверенных хранилищах нет (просмотрено сертификатов: $script:CertScanned)" }
+        if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов вне программ доверия Microsoft и Mozilla в доверенных хранилищах нет (компьютер и вошедшие в систему пользователи; просмотрено сертификатов: $script:CertScanned)" }
         if ($mitm -eq 0 -and $unk -eq 0) { Add-Finding -Level OK -Title 'Посторонних корневых сертификатов нет' }
     }
 
     Invoke-Check 'программы для электронной подписи' {
-        $crypto = @(Get-InstalledNames '(?i)КриптоПро|CryptoPro|ViPNet|Lissi|Signal-COM|Плагин пользователя систем электронного|IFCPlugin|Рутокен|Rutoken|JaCarta|Контур\.?(Плагин|Диагностик)|Kontur\.Plugin')
+        $crypto = @(Get-InstalledNames $script:ESignRx)
         if ($crypto.Count) { Add-Finding -Level INFO -Title "Программы для электронной подписи: $($crypto.Count)" -Detail ($crypto + @('они сами ставят свои корневые сертификаты; если удалить сертификаты, а программы оставить - сертификаты могут вернуться')) }
     }
 }
