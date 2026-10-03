@@ -1,4 +1,4 @@
-param($Path)
+param($Path = (Join-Path $PSScriptRoot '../GlowCleanWin.ps1'))
 $tokens = $null; $errs = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errs)
 "parse errors: $($errs.Count)"
@@ -14,3 +14,4 @@ $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.Fun
 $defined = @($fn | ForEach-Object { $_.Name })
 $calls = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique
 "custom-looking commands not defined: " + ((@($calls | Where-Object { $_ -notin $defined -and -not (Get-Command $_ -ErrorAction SilentlyContinue) })) -join ', ')
+if ($errs.Count -or $bad.Count -or $t7.Count) { exit 1 }

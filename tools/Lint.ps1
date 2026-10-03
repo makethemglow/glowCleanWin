@@ -1,4 +1,4 @@
-param($Path)
+param($Path = (Join-Path $PSScriptRoot '../GlowCleanWin.ps1'))
 $tokens = $null; $errs = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errs)
 $fns = @{}

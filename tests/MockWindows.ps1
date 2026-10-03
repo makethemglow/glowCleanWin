@@ -1,11 +1,13 @@
+# Полный прогон скрипта на имитации Windows (реестр, Defender, планировщик, службы и т.д. подменены).
+# Запуск: pwsh tests/MockWindows.ps1 [-Answers ALL] [-Clean]
 param([string[]]$Answers = @(''), [switch]$Clean)
 $ErrorActionPreference = 'Continue'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $work = Join-Path $here 'fake'; if (Test-Path $work) { Remove-Item $work -Recurse -Force }
 New-Item -ItemType Directory -Path $work | Out-Null
 $env:SystemRoot = 'C:\Windows'; $env:windir = 'C:\Windows'; $env:SystemDrive = 'C:'; $env:COMPUTERNAME = 'TEST-PC'
-Copy-Item (Join-Path $here 'PcCheck.ps1') (Join-Path $work 'PcCheck.ps1')
-. (Join-Path $work 'PcCheck.ps1') -LoadOnly
+Copy-Item (Join-Path $here '../GlowCleanWin.ps1') (Join-Path $work 'GlowCleanWin.ps1')
+. (Join-Path $work 'GlowCleanWin.ps1') -LoadOnly
 # the test certificates get their own entries on the list
 $script:OutsideProgramCa += @((Get-NameHash 'Example Interception Root CA'), (Get-NameHash 'Example Interception Sub CA'))
 

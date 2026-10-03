@@ -1,5 +1,5 @@
 ﻿<#
-PcCheck.ps1 - проверка и лечение ПК с Windows 10/11.
+GlowCleanWin.ps1 - проверка и лечение ПК с Windows 10/11.
 
 ЧТО ДЕЛАЕТ
   1. Только читает: система, защита, сертификаты (в первую очередь посторонние корневые),
@@ -16,17 +16,17 @@ PcCheck.ps1 - проверка и лечение ПК с Windows 10/11.
      и файлы складываются в папку backup рядом с отчётом, всё записывается в журнал.
 
 КАК ЗАПУСКАТЬ
-  Двойной щелчок по PcCheck.cmd (права администратора скрипт запросит сам), либо:
-     powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Tools\PcCheck.ps1"
+  Двойной щелчок по GlowCleanWin.cmd (права администратора скрипт запросит сам), либо:
+     powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Tools\GlowCleanWin.ps1"
   Параметры:
      -ReportOnly   только отчёт, без вопроса об исправлении
      -SkipUpdates  не искать неустановленные обновления (это самая долгая часть)
      -Demo         показать, как выглядит вывод, ничего не проверяя и не меняя
 
 ГДЕ РЕЗУЛЬТАТ
-  Рядом со скриптом: PcCheck_Reports\<компьютер>_<дата>\report.txt и backup\
-  Журнал изменений:   PcCheck_Reports\<компьютер>_changes.tsv
-  Свои "это нормально": PcCheck_Reports\<компьютер>_ignore.txt - по одной строке, кусок заголовка пункта.
+  Рядом со скриптом: GlowCleanWin_Reports\<компьютер>_<дата>\report.txt и backup\
+  Журнал изменений:   GlowCleanWin_Reports\<компьютер>_changes.tsv
+  Свои "это нормально": GlowCleanWin_Reports\<компьютер>_ignore.txt - по одной строке, кусок заголовка пункта.
 
 В отчёт не попадают: командные строки целиком (в них бывают ключи), пароли, содержимое файлов.
 #>
@@ -41,7 +41,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
-$script:Version = '1.0 от 2026-10-03'
+$script:Version = '0.9 от 2026-10-03'
 $script:IsWin = ($env:OS -eq 'Windows_NT')
 $script:DemoMode = [bool]$Demo
 $script:SkipUpdates = [bool]$SkipUpdates
@@ -90,7 +90,7 @@ if ($script:IsWin -and -not $LoadOnly -and -not $Demo) {
     if (-not (Test-Admin)) { $why = 'нет прав администратора' }
     elseif ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { $why = 'запущена 32-битная версия PowerShell' }
     if ($why) {
-        Write-Host "Проверка не запущена: $why. Запусти PcCheck.cmd двойным щелчком из Проводника." -ForegroundColor Red
+        Write-Host "Проверка не запущена: $why. Запусти GlowCleanWin.cmd двойным щелчком из Проводника." -ForegroundColor Red
         if (-not $NoPause) { [void](Read-Host 'Нажми Enter') }
         return
     }
@@ -1286,7 +1286,7 @@ $script:FixHostsLines = {
     $lines = @(Get-Content -LiteralPath $p)
     $n = 0
     foreach ($i in @($f.Data.LineNos)) {
-        if ($i -ge 1 -and $i -le $lines.Count -and $lines[$i - 1] -notmatch '^\s*#') { $lines[$i - 1] = '# [PcCheck] ' + $lines[$i - 1]; $n++ }
+        if ($i -ge 1 -and $i -le $lines.Count -and $lines[$i - 1] -notmatch '^\s*#') { $lines[$i - 1] = '# [GlowCleanWin] ' + $lines[$i - 1]; $n++ }
     }
     $it = Get-Item -LiteralPath $p -Force
     if ($it.IsReadOnly) { $it.IsReadOnly = $false }
@@ -1942,7 +1942,7 @@ function New-RestorePoint {
     try {
         # по умолчанию Windows разрешает одну точку в сутки; на один вызов снимаем это ограничение
         New-ItemProperty -LiteralPath $srKey -Name SystemRestorePointCreationFrequency -Value 0 -PropertyType DWord -Force | Out-Null
-        Checkpoint-Computer -Description "PcCheck $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningVariable cpWarn -WarningAction SilentlyContinue
+        Checkpoint-Computer -Description "GlowCleanWin $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningVariable cpWarn -WarningAction SilentlyContinue
         if ($cpWarn) { Out-Line "  точка восстановления: $($cpWarn -join ' ')" 'Yellow' } else { Out-Line '  точка восстановления создана' 'Green' }
     } catch { Out-Line "  точка восстановления НЕ создана ($($_.Exception.Message)) - остаются копии в папке backup" 'Yellow' }
     finally {
@@ -1989,9 +1989,9 @@ function Initialize-RunFolder {
     $name = "$env:COMPUTERNAME"; if (-not $name) { $name = 'PC' }
     $stamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
     $candidates = @()
-    if ($PSScriptRoot) { $candidates += (Join-P $PSScriptRoot 'PcCheck_Reports') }
-    if ($script:IsWin) { $candidates += (Join-P ([Environment]::GetFolderPath('Desktop')) 'PcCheck_Reports') }
-    $candidates += (Join-P ([IO.Path]::GetTempPath()) 'PcCheck_Reports')
+    if ($PSScriptRoot) { $candidates += (Join-P $PSScriptRoot 'GlowCleanWin_Reports') }
+    if ($script:IsWin) { $candidates += (Join-P ([Environment]::GetFolderPath('Desktop')) 'GlowCleanWin_Reports') }
+    $candidates += (Join-P ([IO.Path]::GetTempPath()) 'GlowCleanWin_Reports')
     foreach ($base in $candidates) {
         try {
             $run = Join-P $base "${name}_$stamp"
@@ -2013,7 +2013,7 @@ function Invoke-Main {
     $who = ''
     if ($script:IsWin) { $who = "$env:COMPUTERNAME, запущено от $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" }
     Out-Line ('=' * 78)
-    Out-Line "  ПРОВЕРКА КОМПЬЮТЕРА  |  PcCheck $script:Version  |  $(Get-Date -Format 'dd.MM.yyyy HH:mm')"
+    Out-Line "  ПРОВЕРКА КОМПЬЮТЕРА  |  GlowCleanWin $script:Version  |  $(Get-Date -Format 'dd.MM.yyyy HH:mm')"
     Out-Line "  $who"
     Out-Line ('=' * 78)
     if ($script:DemoMode) { Out-Line '  ДЕМО-РЕЖИМ: ничего не проверяется и не меняется, данные выдуманы' 'Yellow' }
