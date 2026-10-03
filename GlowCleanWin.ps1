@@ -778,6 +778,7 @@ function Invoke-ProtectionChecks {
             elseif ($qa -gt 14) { Add-Finding -Level WARN -Title "Быстрая проверка была $qa дн. назад" -Fix $script:FixQuickScan -FixText 'запустить быструю проверку (несколько минут)' }
             $fa = [double]$mp.FullScanAge
             if ($fa -gt 100000) { Add-Finding -Level INFO -Title 'Полная проверка Defender не запускалась ни разу' -Detail @('запуск: Start-MpScan -ScanType FullScan (идёт час-два)') }
+            elseif ($fa -lt 1) { Add-Finding -Level INFO -Title 'Полная проверка Defender была сегодня' }
             else { Add-Finding -Level INFO -Title "Полная проверка Defender была $fa дн. назад" }
         }
     }
@@ -1215,7 +1216,11 @@ function Invoke-BrowserChecks {
                 if (Test-PathSafe $lj) {
                     $cnt = 0
                     try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins | Where-Object { $_.encryptedPassword }).Count } catch { }
-                    if ($cnt -gt 0) { Add-Finding -Level INFO -Title "$tag - сохранённых паролей в браузере: $cnt" -Detail @('надёжнее держать пароли в менеджере паролей (KeePassXC), а не в браузере') }
+                    if ($cnt -gt 0) {
+                        # файл может быть остатком прежнего хранилища: поэтому показываем и его дату
+                        $when = (Get-Item -LiteralPath $lj -Force).LastWriteTime.ToString('dd.MM.yyyy')
+                        Add-Finding -Level INFO -Title "$tag - в файле паролей logins.json записей: $cnt (файл от $when)" -Detail @('если на странице about:logins пусто, а файл старый - это остаток прежнего хранилища паролей', 'без мастер-пароля такие записи расшифрует любой, кто получит файлы профиля; надёжнее держать пароли в менеджере паролей (KeePassXC)')
+                    }
                 }
             }
         }
