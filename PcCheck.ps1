@@ -763,3 +763,377 @@ function Invoke-ProtectionChecks {
         else { Add-Finding -Level OK -Title 'SMB1 выключен' }
     }
 }
+
+# ================================================================ 3. СЕРТИФИКАТЫ
+$script:CertStores = @('Root', 'AuthRoot', 'CA', 'TrustedPublisher', 'TrustedPeople')
+$script:StoreNames = @{ Root = 'Доверенные корневые'; AuthRoot = 'Сторонние корневые'; CA = 'Промежуточные'; TrustedPublisher = 'Доверенные издатели'; TrustedPeople = 'Доверенные лица' }
+# Корневые сертификаты, которых нет в программах доверия Microsoft и Mozilla, но которые массово ставят вручную
+# (по инструкции провайдера, работодателя, ведомства). В списке - SHA-256 от имени сертификата (CN) в нижнем регистре.
+# Добавить свой: Get-NameHash 'Имя сертификата'
+$script:OutsideProgramCa = @(
+    '31311E0CA1FC4A941ECA27B835579DB8697259E8304F5102F1B2DF84C5BD2183',
+    '85647D852E0AA6224CE11BF06E7F307C4E438BBC3B1F20CD2918F4EC39B60AA3',
+    'E66CB6EBE8A3563B7ABCCF3E0E26B398F456EB5EA5D00A3E536B7F525BF6E51B',
+    'C011DF848D897424F6E4A6461E145416AD90B91D003E677C4C35A41E78587BC9'
+)
+function Get-NameHash {
+    param([string]$Name)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Name.Trim().ToLowerInvariant()))) -replace '-', '') } finally { $sha.Dispose() }
+}
+function Test-OutsideProgramCa {
+    # совпадение по имени самого сертификата или по имени того, кто его выдал
+    param($Cert)
+    foreach ($n in @($Cert.GetNameInfo('SimpleName', $false), $Cert.GetNameInfo('SimpleName', $true))) {
+        if ($n -and ($script:OutsideProgramCa -contains (Get-NameHash $n))) { return $true }
+    }
+    return $false
+}
+function Get-DerCommonNames {
+    # имена (CN) всех сертификатов, чьи байты встречаются в файле; $Text - содержимое файла в кодировке Latin-1
+    param([string]$Text)
+    $names = @{}
+    $oid = [string][char]0x06 + [char]0x03 + [char]0x55 + [char]0x04 + [char]0x03
+    $i = $Text.IndexOf($oid, [StringComparison]::Ordinal)
+    while ($i -ge 0 -and $i + 7 -lt $Text.Length) {
+        $tag = [int]$Text[$i + 5]; $len = [int]$Text[$i + 6]
+        if ($len -gt 0 -and $len -lt 128 -and $i + 7 + $len -le $Text.Length) {
+            $bytes = [Text.Encoding]::GetEncoding(28591).GetBytes($Text.Substring($i + 7, $len))
+            $s = ''
+            if ($tag -eq 0x1E) { $s = [Text.Encoding]::BigEndianUnicode.GetString($bytes) }
+            elseif ($tag -eq 0x0C -or $tag -eq 0x13 -or $tag -eq 0x14 -or $tag -eq 0x16) { $s = [Text.Encoding]::UTF8.GetString($bytes) }
+            if ($s) { $names[$s] = 1 }
+        }
+        $i = $Text.IndexOf($oid, $i + 5, [StringComparison]::Ordinal)
+    }
+    return @($names.Keys)
+}
+# корневые сертификаты программ, которые вскрывают HTTPS. App = как называется программа в списке установленных
+$script:MitmRoots = @(
+    @{ Rx = '(?i)Kaspersky|Касперск'; App = '(?i)Kaspersky|Касперск'; Name = 'Kaspersky'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)avast|AVG Technologies|AVG Web'; App = '(?i)avast|\bAVG\b'; Name = 'Avast/AVG'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)ESET SSL Filter'; App = '(?i)\bESET\b'; Name = 'ESET'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)Dr\.?\s?Web'; App = '(?i)Dr\.?\s?Web'; Name = 'Dr.Web'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)Bitdefender'; App = '(?i)Bitdefender'; Name = 'Bitdefender'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)AdGuard'; App = '(?i)AdGuard'; Name = 'AdGuard'; Dev = $false; Always = $false },
+    @{ Rx = '(?i)DO_NOT_TRUST|FiddlerRoot'; App = '(?i)Fiddler'; Name = 'Fiddler'; Dev = $true; Always = $false },
+    @{ Rx = '(?i)mitmproxy'; App = '(?i)mitmproxy'; Name = 'mitmproxy'; Dev = $true; Always = $false },
+    @{ Rx = '(?i)PortSwigger'; App = '(?i)Burp Suite'; Name = 'Burp Suite'; Dev = $true; Always = $false },
+    @{ Rx = '(?i)Charles Proxy'; App = '(?i)Charles'; Name = 'Charles'; Dev = $true; Always = $false },
+    @{ Rx = '(?i)Superfish|eDellRoot|DSDTestProvider|Komodia|PrivDog|VisualDiscovery|WebCompanion|Lavasoft'; App = ''; Name = 'известное рекламное/шпионское ПО'; Dev = $false; Always = $true }
+)
+# центры сертификации, которые нормально встречаются в хранилище "Доверенные корневые"
+$script:KnownRootRx = '(?i)(' + (@(
+        'Microsoft', 'VeriSign', 'Thawte', 'Symantec', 'DigiCert', 'GlobalSign', 'Sectigo', 'USERTrust', 'COMODO', 'AAA Certificate Services', 'AddTrust', 'UTN-',
+        'GeoTrust', 'Equifax', 'Entrust', 'Go Daddy', 'Starfield', 'Baltimore', 'ISRG', 'Amazon', 'QuoVadis', 'Certum', 'Unizeto', 'Actalis', 'SSL\.com', 'Buypass',
+        'T-TeleSec', 'Telekom', 'Hotspot 2\.0', 'IdenTrust', 'DST Root', 'Digital Signature Trust', 'SecureTrust', 'Trustwave', 'XRamp', 'GTS Root', 'Google Trust',
+        'AffirmTrust', 'Certigna', 'SwissSign', 'NO LIABILITY ACCEPTED', 'Class 3 Public Primary', 'Network Solutions', 'HARICA', 'Hellenic', 'D-TRUST', 'Telia',
+        'SECOM', 'Security Communication', 'Chunghwa', 'TWCA', 'emSign', 'eMudhra', 'Izenpe', 'ACCV', 'FNMT', 'Camerfirma', 'NetLock', 'Microsec', 'e-Szigno',
+        'OISTE', 'WISeKey', 'Atos', 'Cybertrust', 'GTE CyberTrust', 'Verizon', 'certSIGN', 'TUBITAK', 'CFCA', 'Hongkong Post', 'NAVER', 'Staat der Nederlanden',
+        'SZAFIR', 'LuxTrust', 'Certinomis', 'Certplus', 'OpenTrust', 'Trustis', 'TeliaSonera', 'Sonera'
+    ) -join '|') + ')'
+
+function ConvertFrom-CertBlob {
+    # запись реестра SystemCertificates: цепочка (id:4, флаг:4, длина:4, данные); id 32 = сам сертификат
+    param([byte[]]$Blob)
+    $i = 0
+    while ($i + 12 -le $Blob.Length) {
+        $id = [BitConverter]::ToUInt32($Blob, $i)
+        $len = [int][BitConverter]::ToUInt32($Blob, $i + 8)
+        $i += 12
+        if ($len -lt 0 -or $i + $len -gt $Blob.Length) { break }
+        if ($id -eq 32) {
+            $der = New-Object byte[] $len
+            [Array]::Copy($Blob, $i, $der, 0, $len)
+            try { return (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (, $der)) } catch { return $null }
+        }
+        $i += $len
+    }
+    return $null
+}
+
+function Get-StoreCerts {
+    $map = @{}
+    $bases = @(
+        @{ T = 'компьютер'; B = 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' },
+        @{ T = 'компьютер, групповая политика'; B = 'HKLM:\SOFTWARE\Policies\Microsoft\SystemCertificates' },
+        @{ T = 'компьютер, Enterprise'; B = 'HKLM:\SOFTWARE\Microsoft\EnterpriseCertificates' }
+    )
+    foreach ($h in $script:UserHives) {
+        $bases += @{ T = "пользователь $($h.Name)"; B = "$($h.Hive)\Software\Microsoft\SystemCertificates" }
+        $bases += @{ T = "пользователь $($h.Name), политика"; B = "$($h.Hive)\Software\Policies\Microsoft\SystemCertificates" }
+    }
+    $script:CertScanned = 0
+    foreach ($b in $bases) {
+        foreach ($s in $script:CertStores) {
+            $kp = "$($b.B)\$s\Certificates"
+            foreach ($k in @(Get-ChildItem -LiteralPath $kp -ErrorAction SilentlyContinue)) {
+                $blob = $null
+                try { $blob = (Get-Item -LiteralPath $k.PSPath -ErrorAction Stop).GetValue('Blob') } catch { }
+                if (-not ($blob -is [byte[]])) { continue }
+                $c = ConvertFrom-CertBlob $blob
+                if (-not $c) { continue }
+                $script:CertScanned++
+                $key = "$s|$($c.Thumbprint)"
+                if (-not $map.ContainsKey($key)) { $map[$key] = [pscustomobject]@{ Store = $s; Thumb = $c.Thumbprint; Cert = $c; Where = @(); RegPaths = @(); Api = @(); UserStore = $false } }
+                $map[$key].Where += $b.T
+                $map[$key].RegPaths += $k.PSPath
+                if ($b.T -like 'пользователь*') { $map[$key].UserStore = $true }
+            }
+        }
+    }
+    # сверка через системный API: вдруг сертификат лежит там, куда реестровый обход не заглянул
+    foreach ($loc in @('LocalMachine', 'CurrentUser')) {
+        foreach ($s in $script:CertStores) {
+            try {
+                $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($s, [System.Security.Cryptography.X509Certificates.StoreLocation]$loc)
+                $st.Open('ReadOnly')
+                foreach ($c in $st.Certificates) {
+                    $key = "$s|$($c.Thumbprint)"
+                    if (-not $map.ContainsKey($key)) {
+                        $map[$key] = [pscustomobject]@{ Store = $s; Thumb = $c.Thumbprint; Cert = $c; Where = @("$loc (видно только через API)"); RegPaths = @(); Api = @($loc); UserStore = ($loc -eq 'CurrentUser') }
+                        $script:CertScanned++
+                    }
+                }
+                $st.Close()
+            } catch { }
+        }
+    }
+    return @($map.Values)
+}
+
+function Get-CertLines {
+    param($e)
+    $c = $e.Cert
+    return @(
+        "кому выдан: $($c.Subject)",
+        "кем выдан:  $($c.Issuer)",
+        "хранилище: $($script:StoreNames[$e.Store]) ($($e.Store)); где лежит: $(($e.Where | Sort-Object -Unique) -join '; ')",
+        "действует до $($c.NotAfter.ToString('dd.MM.yyyy')); отпечаток $($c.Thumbprint)"
+    )
+}
+
+$script:FixRemoveCert = {
+    param($f)
+    $d = $f.Data
+    $dir = Join-Path (Get-BackupDir) 'certs'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::WriteAllBytes((Join-Path $dir "$($d.Store)_$($d.Thumb).cer"), $d.Der)
+    $n = 0
+    foreach ($kp in $d.RegPaths) {
+        if (Test-Path -LiteralPath $kp) {
+            Export-RegKey $kp "certs\$($d.Store)_$($d.Thumb)_$n.reg" | Out-Null
+            Remove-Item -LiteralPath $kp -Recurse -Force
+            Add-Change 'certificate removed' "$($d.Subject)`t$($d.Thumb)`t$(ConvertTo-NativeRegPath $kp)"
+            $n++
+        }
+    }
+    # то, что видно только через API (или осталось после реестра) - убираем через API из хранилища компьютера
+    $left = @()
+    foreach ($loc in @('LocalMachine', 'CurrentUser')) {
+        $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($d.Store, [System.Security.Cryptography.X509Certificates.StoreLocation]$loc)
+        try {
+            $st.Open('ReadOnly')
+            $hit = @($st.Certificates | Where-Object { $_.Thumbprint -eq $d.Thumb })
+            $st.Close()
+            if ($hit.Count -and $loc -eq 'LocalMachine') {
+                $st.Open('ReadWrite'); foreach ($c in $hit) { $st.Remove($c) }; $st.Close()
+                Add-Change 'certificate removed (API)' "$($d.Subject)`t$($d.Thumb)`tLocalMachine\$($d.Store)"
+                $st.Open('ReadOnly'); $hit = @($st.Certificates | Where-Object { $_.Thumbprint -eq $d.Thumb }); $st.Close()
+            }
+            if ($hit.Count) { $left += $loc }
+        } catch { try { $st.Close() } catch { } }
+    }
+    if ($left.Count) { throw "сертификат всё ещё виден в $($left -join ', ') - его возвращает политика или программа; удалить вручную: certmgr.msc / certlm.msc > $($script:StoreNames[$d.Store])" }
+    return "удалён ($n записей реестра); копия: backup\certs\$($d.Store)_$($d.Thumb).cer"
+}
+
+function Invoke-CertificateChecks {
+    Start-Section 'Сертификаты'
+    Invoke-Check 'доверенные хранилища сертификатов Windows' {
+        $all = @(Get-StoreCerts)
+        $out = 0; $mitm = 0; $unk = 0
+        foreach ($e in ($all | Sort-Object Store, Thumb)) {
+            $c = $e.Cert
+            $name = $c.GetNameInfo('SimpleName', $false)
+            if (-not $name) { $name = $c.Subject }
+            $data = @{ Store = $e.Store; Thumb = $e.Thumb; RegPaths = @($e.RegPaths); Subject = $c.Subject; Der = $c.RawData }
+            $anchor = ($e.Store -eq 'Root' -or $e.Store -eq 'AuthRoot')
+            if (Test-OutsideProgramCa $c) {
+                $out++
+                if ($anchor -or $e.Store -eq 'CA') {
+                    $what = 'Корневой'; if ($e.Store -eq 'CA') { $what = 'Промежуточный' }
+                    Add-Finding -Level BAD -Title "$what сертификат вне программ доверия Microsoft и Mozilla: $name" -Detail ((Get-CertLines $e) + @('с ним владелец сертификата может незаметно подменять любые HTTPS-сайты на этом компьютере')) `
+                        -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется). Сайты, которые работают только на нём, начнут показывать предупреждение в браузере' -Data $data
+                } else {
+                    Add-Finding -Level WARN -Title "Сертификат вне программ доверия в «$($script:StoreNames[$e.Store])»: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit
+                }
+                continue
+            }
+            if (-not $anchor) { continue }
+            $hit = $null
+            foreach ($m in $script:MitmRoots) { if ($c.Subject -match $m.Rx) { $hit = $m; break } }
+            if ($hit) {
+                $mitm++
+                $inst = $false; if ($hit.App) { $inst = Test-Installed $hit.App }
+                if ($hit.Always) {
+                    Add-Finding -Level BAD -Title "Корневой сертификат рекламного/шпионского ПО: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data
+                } elseif (-not $inst) {
+                    Add-Finding -Level BAD -Title "Корневой сертификат от удалённой программы ($($hit.Name)): $name" -Detail ((Get-CertLines $e) + @('программы уже нет, а её сертификат для вскрытия HTTPS остался доверенным')) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data
+                } elseif ($hit.Dev) {
+                    Add-Finding -Level WARN -Title "Корневой сертификат инструмента перехвата трафика ($($hit.Name)): $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit
+                } else {
+                    Add-Finding -Level INFO -Title "Корневой сертификат установленной программы $($hit.Name): $name" -Detail @('программа с его помощью просматривает HTTPS-трафик; исчезнет вместе с программой')
+                }
+                continue
+            }
+            if ($e.Store -eq 'Root' -and $c.Subject -notmatch $script:KnownRootRx) {
+                $unk++
+                Add-Finding -Level WARN -Title "Незнакомый корневой сертификат: $name" -Detail (Get-CertLines $e) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
+            }
+        }
+        if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов вне программ доверия Microsoft и Mozilla в доверенных хранилищах нет (просмотрено сертификатов: $script:CertScanned)" }
+        if ($mitm -eq 0 -and $unk -eq 0) { Add-Finding -Level OK -Title 'Посторонних корневых сертификатов нет' }
+    }
+
+    Invoke-Check 'программы для электронной подписи' {
+        $crypto = Get-InstalledNames '(?i)КриптоПро|CryptoPro|ViPNet|Lissi|Signal-COM|Плагин пользователя систем электронного|IFCPlugin|Рутокен|Rutoken|JaCarta|Контур\.?(Плагин|Диагностик)|Kontur\.Plugin'
+        if ($crypto.Count) { Add-Finding -Level INFO -Title "Программы для электронной подписи: $($crypto.Count)" -Detail ($crypto + @('они сами ставят свои корневые сертификаты; если удалить сертификаты, а программы оставить - сертификаты могут вернуться')) }
+    }
+}
+
+# ================================================================ 4. БРАУЗЕРЫ
+$script:FixFirefoxRoots = {
+    param($f)
+    $uj = Join-Path $f.Data.Profile 'user.js'
+    $lines = @()
+    if (Test-Path -LiteralPath $uj) {
+        Backup-File $uj | Out-Null
+        $lines = @(Get-Content -LiteralPath $uj -Encoding UTF8 | Where-Object { $_ -notmatch 'security\.enterprise_roots\.enabled' })
+    }
+    $lines += 'user_pref("security.enterprise_roots.enabled", false);'
+    [IO.File]::WriteAllLines($uj, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+    Add-Change 'firefox pref' "$uj`tsecurity.enterprise_roots.enabled=false"
+    return 'записано в user.js профиля; подействует после перезапуска Firefox'
+}
+$script:FixMoveFile = {
+    param($f)
+    if ($f.Data.NeedClosed -and @(Get-Process -Name $f.Data.NeedClosed -ErrorAction SilentlyContinue).Count) { throw "сначала закрой программу $($f.Data.NeedClosed) и запусти проверку ещё раз" }
+    $n = 0
+    foreach ($p in @($f.Data.Paths)) {
+        if (Test-Path -LiteralPath $p) {
+            $dst = Backup-File $p
+            Remove-Item -LiteralPath $p -Force
+            Add-Change 'file removed' "$p`tкопия: $dst"
+            $n++
+        }
+    }
+    return "убрано файлов: $n (копии в backup\files)"
+}
+
+function Invoke-BrowserChecks {
+    Start-Section 'Браузеры'
+    $profiles = @(Get-AllProfiles)
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+
+    Invoke-Check 'Firefox: профили' {
+        $found = 0
+        foreach ($up in $profiles) {
+            $root = Join-Path $up.Profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
+            foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
+                $prefs = Join-Path $d.FullName 'prefs.js'
+                if (-not (Test-Path -LiteralPath $prefs)) { continue }
+                $found++
+                $tag = "Firefox, профиль $($d.Name) ($($up.Name))"
+                $state = $null
+                foreach ($pf in @('prefs.js', 'user.js')) {
+                    $fp = Join-Path $d.FullName $pf
+                    if (Test-Path -LiteralPath $fp) {
+                        $m = Select-String -LiteralPath $fp -Pattern 'user_pref\("security\.enterprise_roots\.enabled",\s*(true|false)\)' -ErrorAction SilentlyContinue | Select-Object -Last 1
+                        if ($m) { $state = $m.Matches[0].Groups[1].Value }
+                    }
+                }
+                if ($state -eq 'false') {
+                    Add-Finding -Level OK -Title "$tag - не доверяет сертификатам, добавленным в Windows"
+                } else {
+                    $why = 'настройка по умолчанию'; if ($state -eq 'true') { $why = 'включено явно' }
+                    Add-Finding -Level WARN -Title "$tag - доверяет всем сертификатам, добавленным в Windows ($why)" -Detail @('Настройки > Приватность и защита > Сертификаты > "Разрешить Firefox автоматически доверять сторонним корневым сертификатам"') `
+                        -Fix $script:FixFirefoxRoots -FixText 'выключить это доверие (строка в user.js профиля)' -Data @{ Profile = $d.FullName }
+                }
+                $db = Join-Path $d.FullName 'cert9.db'
+                if (Test-Path -LiteralPath $db) {
+                    $txt = ''
+                    try {
+                        $fs = New-Object IO.FileStream($db, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                        $buf = New-Object byte[] $fs.Length
+                        [void]$fs.Read($buf, 0, $buf.Length); $fs.Close()
+                        $txt = $latin1.GetString($buf)
+                    } catch { }
+                    $hit = @(Get-DerCommonNames $txt | Where-Object { $script:OutsideProgramCa -contains (Get-NameHash $_) })
+                    if ($hit.Count) {
+                        Add-Finding -Level BAD -Title "$tag - в собственной базе сертификатов Firefox есть корневой сертификат вне программ доверия" -Detail @('его импортировали прямо в Firefox (или это след уже удалённого)', $db) `
+                            -Fix $script:FixMoveFile -FixText 'убрать файл cert9.db в backup (Firefox создаст чистый; пропадут только вручную добавленные сертификаты и исключения). Firefox должен быть закрыт' -Data @{ Paths = @($db); NeedClosed = 'firefox' }
+                    } else {
+                        Add-Finding -Level OK -Title "$tag - в собственной базе сертификатов вне программ доверия нет"
+                    }
+                }
+                $lj = Join-Path $d.FullName 'logins.json'
+                if (Test-Path -LiteralPath $lj) {
+                    $cnt = 0
+                    try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins).Count } catch { }
+                    if ($cnt -gt 0) { Add-Finding -Level INFO -Title "$tag - сохранённых паролей в браузере: $cnt" -Detail @('надёжнее держать пароли в менеджере паролей (KeePassXC), а не в браузере') }
+                }
+            }
+        }
+        if ($found -eq 0) { Add-Finding -Level INFO -Title 'Firefox: профилей не найдено' }
+    }
+
+    Invoke-Check 'Firefox: чужие файлы настроек в папке программы' {
+        $dirs = @('C:\Program Files\Mozilla Firefox', 'C:\Program Files (x86)\Mozilla Firefox', 'C:\Program Files\Firefox Developer Edition', 'C:\Program Files\Firefox Nightly')
+        foreach ($p in @($script:Programs | Where-Object { $_.Name -match '(?i)Firefox' -and $_.Location })) { $dirs += $p.Location.TrimEnd('\') }
+        $kasper = Test-Installed '(?i)Kaspersky|Касперск'
+        foreach ($base in @($dirs | Sort-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $base 'firefox.exe'))) { continue }
+            $extra = @()
+            $extra += @(Get-ChildItem -LiteralPath (Join-Path $base 'defaults\pref') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'channel-prefs.js' })
+            $extra += @(Get-ChildItem -LiteralPath $base -File -Force -Filter '*.cfg' -ErrorAction SilentlyContinue)
+            $extra += @(Get-ChildItem -LiteralPath (Join-Path $base 'distribution') -File -Force -Filter 'policies.json' -ErrorAction SilentlyContinue)
+            if ($extra.Count -eq 0) { Add-Finding -Level OK -Title "Firefox ($base): чужих файлов настроек нет"; continue }
+            $kl = @($extra | Where-Object { $_.Name -match '^kl_' })
+            $other = @($extra | Where-Object { $_.Name -notmatch '^kl_' })
+            if ($kl.Count -and -not $kasper) {
+                Add-Finding -Level BAD -Title "Firefox ($base): остались файлы Kaspersky, которые насильно включают доверие сертификатам Windows" -Detail @($kl | ForEach-Object { $_.FullName }) `
+                    -Fix $script:FixMoveFile -FixText 'убрать эти файлы (копии в backup)' -Data @{ Paths = @($kl | ForEach-Object { $_.FullName }) }
+            } elseif ($kl.Count) {
+                Add-Finding -Level INFO -Title "Firefox ($base): файлы настроек от установленного Kaspersky" -Detail @($kl | ForEach-Object { $_.Name })
+            }
+            if ($other.Count) {
+                Add-Finding -Level WARN -Title "Firefox ($base): посторонние файлы настроек (ими программы и организации управляют браузером)" -Detail @($other | ForEach-Object { "$($_.FullName) | $($_.LastWriteTime.ToString('dd.MM.yyyy'))" }) -Manual 'выяснить, кто их положил; если непонятно - показать отчёт'
+            }
+        }
+        foreach ($pp in @('HKLM:\SOFTWARE\Policies\Mozilla\Firefox\Certificates', "$($script:Ctx.MainHive)\Software\Policies\Mozilla\Firefox\Certificates")) {
+            $v = Get-RegValue $pp 'ImportEnterpriseRoots'
+            if ($null -ne $v -and "$v" -eq '1') { Add-Finding -Level WARN -Title 'Политика заставляет Firefox доверять сертификатам Windows (ImportEnterpriseRoots)' -Detail @((ConvertTo-NativeRegPath $pp)) -Fix $script:FixRegValueRemove -FixText 'удалить эту политику' -Data @{ Path = $pp; Name = 'ImportEnterpriseRoots' } }
+        }
+    }
+
+    Invoke-Check 'браузеры с собственным списком доверенных сертификатов' {
+        $ya = Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom|^Atom$'
+        foreach ($up in $profiles) { if (Test-Path -LiteralPath (Join-Path $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
+        $ya = @($ya | Sort-Object -Unique)
+        if ($ya.Count) {
+            Add-Finding -Level INFO -Title 'Установлен браузер с собственным списком доверенных сертификатов' -Detail ($ya + @('он доверяет дополнительным корневым сертификатам независимо от хранилища Windows - проверка хранилища на него не распространяется'))
+        } else { Add-Finding -Level OK -Title 'Браузеров с собственным списком доверенных сертификатов нет' }
+    }
+
+    Invoke-Check 'политики, управляющие Chrome и Edge' {
+        foreach ($pp in @('HKLM:\SOFTWARE\Policies\Google\Chrome', "$($script:Ctx.MainHive)\Software\Policies\Google\Chrome", "$($script:Ctx.MainHive)\Software\Policies\Microsoft\Edge")) {
+            if (-not (Test-Path -LiteralPath $pp)) { continue }
+            $names = @((Get-Item -LiteralPath $pp).GetValueNames() | Where-Object { $_ })
+            $sub = @(Get-ChildItem -LiteralPath $pp -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
+            if ($names.Count + $sub.Count -gt 0) {
+                Add-Finding -Level WARN -Title "Браузером управляет политика: $(ConvertTo-NativeRegPath $pp)" -Detail @("параметры: $((@($names) + @($sub)) -join ', ')", 'на домашнем компьютере так делают вредные расширения и рекламные программы (принудительная установка расширений, подмена поиска)') -Manual 'если не настраивал сам - показать отчёт'
+            }
+        }
+    }
+}
