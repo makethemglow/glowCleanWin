@@ -1,0 +1,4 @@
+# reports, backups and journals written next to the script
+*_Reports/
+# scratch folder of the mock-Windows test
+fake/
