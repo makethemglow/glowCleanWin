@@ -408,3 +408,358 @@ function Get-Programs {
 }
 function Test-Installed { param([string]$Rx) return (@($script:Programs | Where-Object { $_.Name -match $Rx -or $_.Publisher -match $Rx }).Count -gt 0) }
 function Get-InstalledNames { param([string]$Rx) return @($script:Programs | Where-Object { -not $_.Hidden -and $_.Name -match $Rx } | ForEach-Object { "$($_.Name) $($_.Version)".Trim() } | Sort-Object -Unique) }
+
+# ================================================================ 1. СИСТЕМА
+function Invoke-SystemChecks {
+    Start-Section 'Система'
+
+    Invoke-Check 'версия Windows' {
+        $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $os = Get-CimInstance Win32_OperatingSystem
+        $build = [int]$cv.CurrentBuild
+        $ver = "$($os.Caption) $($cv.DisplayVersion), сборка $build.$($cv.UBR)"
+        if ($build -lt 19045) {
+            Add-Finding -Level BAD -Title "Очень старая Windows без обновлений безопасности: $ver" -Manual 'обновить Windows до актуальной версии (Параметры > Центр обновления) или переустановить'
+        } elseif ($build -lt 22000) {
+            Add-Finding -Level WARN -Title "Windows 10: поддержка закончилась 14.10.2025 ($ver)" -Detail @('обновления безопасности приходят только по платной/временной программе ESU') -Manual 'перейти на Windows 11, если железо позволяет, или подключить ESU'
+        } elseif ($build -lt 26100) {
+            Add-Finding -Level WARN -Title "Старая версия Windows 11, она больше не получает обновлений: $ver" -Manual 'Параметры > Центр обновления Windows > установить обновление до 24H2/25H2'
+        } else {
+            Add-Finding -Level OK -Title "Версия Windows актуальная: $ver"
+        }
+    }
+
+    Invoke-Check 'когда ставились обновления' {
+        $hf = @(Get-HotFix -ErrorAction SilentlyContinue | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn)
+        if ($hf.Count -eq 0) { Add-Finding -Level INFO -Title 'Не удалось определить дату последнего обновления Windows'; return }
+        $last = $hf[-1]
+        $days = [int]((Get-Date) - $last.InstalledOn).TotalDays
+        $t = "последнее обновление Windows: $($last.InstalledOn.ToString('dd.MM.yyyy')) ($($last.HotFixID)), $days дн. назад"
+        if ($days -gt 100) { Add-Finding -Level BAD -Title "Windows давно не обновлялась - $t" -Manual 'Параметры > Центр обновления Windows > Проверить наличие обновлений; повторять до "Вы используете последнюю версию"' }
+        elseif ($days -gt 45) { Add-Finding -Level WARN -Title "Обновления запаздывают - $t" -Manual 'Параметры > Центр обновления Windows > Проверить наличие обновлений' }
+        else { Add-Finding -Level OK -Title "Обновления ставятся - $t" }
+    }
+
+    Invoke-Check 'неустановленные обновления (поиск идёт до нескольких минут)' {
+        if ($script:SkipUpdates) { Add-Finding -Level INFO -Title 'Поиск неустановленных обновлений пропущен (-SkipUpdates)'; return }
+        if (-not $script:UpdCache) {
+            $session = New-Object -ComObject Microsoft.Update.Session
+            $res = $session.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0')
+            $list = @()
+            foreach ($u in $res.Updates) { $list += [pscustomobject]@{ Title = "$($u.Title)"; Type = [int]$u.Type } }
+            $script:UpdCache = @{ List = $list }
+        }
+        $all = @($script:UpdCache.List | Where-Object { $_.Title -notmatch '(?i)Security Intelligence Update|KB2267602|механизма обнаружения|аналитики безопасности' })
+        $soft = @($all | Where-Object { $_.Type -ne 2 })
+        $drv = @($all | Where-Object { $_.Type -eq 2 })
+        if ($soft.Count -gt 0) {
+            Add-Finding -Level WARN -Title "Windows Update: не установлено обновлений: $($soft.Count)" -Detail @($soft | ForEach-Object { $_.Title }) -Manual 'Параметры > Центр обновления Windows > Установить всё'
+        } else { Add-Finding -Level OK -Title 'Windows Update: все обновления системы установлены' }
+        if ($drv.Count -gt 0) { Add-Finding -Level INFO -Title "Windows Update предлагает драйверы: $($drv.Count)" -Detail @($drv | ForEach-Object { $_.Title }) }
+    }
+
+    Invoke-Check 'ожидание перезагрузки' {
+        $pending = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+        if ($pending) { Add-Finding -Level WARN -Title 'Windows ждёт перезагрузки, чтобы доустановить обновления' -Manual 'перезагрузить компьютер' }
+    }
+
+    Invoke-Check 'здоровье дисков' {
+        foreach ($d in @(Get-PhysicalDisk | Sort-Object DeviceId)) {
+            $name = "$($d.FriendlyName) ($($d.MediaType), $([math]::Round($d.Size / 1GB)) ГБ)"
+            $r = $null
+            try { $r = $d | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+            $det = @()
+            if ($r) {
+                $parts = @()
+                if ($null -ne $r.Wear) { $parts += "износ $($r.Wear)%" }
+                if ($r.Temperature) { $parts += "температура $($r.Temperature) C" }
+                if ($r.PowerOnHours) { $parts += "наработка $($r.PowerOnHours) ч" }
+                if ($r.ReadErrorsUncorrected) { $parts += "неисправленных ошибок чтения: $($r.ReadErrorsUncorrected)" }
+                if ($r.WriteErrorsUncorrected) { $parts += "неисправленных ошибок записи: $($r.WriteErrorsUncorrected)" }
+                if ($parts.Count) { $det += ($parts -join ', ') }
+            }
+            if ("$($d.HealthStatus)" -ne 'Healthy') {
+                Add-Finding -Level BAD -Title "Диск сообщает о проблемах: $name - $($d.HealthStatus)" -Detail $det -Manual 'СРАЗУ сделать копию важных файлов на другой диск, потом менять диск'
+            } elseif ($r -and $null -ne $r.Wear -and $r.Wear -ge 90) {
+                Add-Finding -Level BAD -Title "SSD почти выработал ресурс: $name" -Detail $det -Manual 'сделать копию данных и планировать замену диска'
+            } elseif ($r -and $null -ne $r.Wear -and $r.Wear -ge 70) {
+                Add-Finding -Level WARN -Title "SSD заметно изношен: $name" -Detail $det -Manual 'следить за износом, держать свежую резервную копию'
+            } elseif ($r -and ($r.ReadErrorsUncorrected -gt 0 -or $r.WriteErrorsUncorrected -gt 0)) {
+                Add-Finding -Level WARN -Title "У диска есть неисправленные ошибки: $name" -Detail $det -Manual 'проверить диск в CrystalDiskInfo, держать резервную копию'
+            } else {
+                Add-Finding -Level OK -Title "Диск здоров: $name" -Detail $det
+            }
+        }
+    }
+
+    Invoke-Check 'свободное место' {
+        $sys = "$($env:SystemDrive)".TrimEnd(':')
+        foreach ($v in @(Get-Volume | Where-Object { $_.DriveLetter -and "$($_.DriveType)" -eq 'Fixed' -and $_.Size -gt 0 } | Sort-Object DriveLetter)) {
+            $freeGb = [math]::Round($v.SizeRemaining / 1GB, 1); $pct = [math]::Round(100 * $v.SizeRemaining / $v.Size)
+            $t = "$($v.DriveLetter): свободно $freeGb ГБ из $([math]::Round($v.Size / 1GB)) ГБ ($pct%)"
+            if ("$($v.DriveLetter)" -eq $sys -and $freeGb -lt 10) { Add-Finding -Level BAD -Title "На системном диске почти нет места - $t" -Manual 'Параметры > Система > Память > Рекомендации по очистке' }
+            elseif ($pct -lt 10) { Add-Finding -Level WARN -Title "Мало места - $t" -Manual 'Параметры > Система > Память' }
+            else { Add-Finding -Level OK -Title "Место на диске $t" }
+            if ("$($v.HealthStatus)" -ne 'Healthy') { Add-Finding -Level BAD -Title "Файловая система диска $($v.DriveLetter): не в порядке ($($v.HealthStatus))" -Manual "в PowerShell от администратора: chkdsk $($v.DriveLetter): /scan" }
+        }
+    }
+
+    Invoke-Check 'шифрование диска (BitLocker)' {
+        $bl = $null
+        try { $bl = @(Get-BitLockerVolume -ErrorAction Stop) } catch { }
+        if ($null -eq $bl) { Add-Finding -Level INFO -Title 'BitLocker: состояние недоступно (в редакции Home его нет)'; return }
+        foreach ($b in $bl) {
+            if ("$($b.VolumeType)" -ne 'OperatingSystem' -and "$($b.ProtectionStatus)" -ne 'On') { continue }
+            Add-Finding -Level INFO -Title "BitLocker $($b.MountPoint) $($b.VolumeStatus), защита: $($b.ProtectionStatus)"
+        }
+    }
+
+    Invoke-Check 'активация' {
+        $det = @()
+        $kms = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform' 'KeyManagementServiceName'
+        if ($kms) { $det += "Windows настроена на KMS-сервер: $kms" }
+        $kmsO = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\OfficeSoftwareProtectionPlatform' 'KeyManagementServiceName'
+        if ($kmsO) { $det += "Office настроен на KMS-сервер: $kmsO" }
+        foreach ($p in @('C:\Windows\AAct_Tools', 'C:\Windows\KMSAutoS', 'C:\ProgramData\KMSAutoS', 'C:\ProgramData\KMSAuto', 'C:\Program Files\KMSpico', 'C:\Windows\SECOH-QAD.exe', 'C:\ProgramData\Online_KMS_Activation')) {
+            if (Test-Path -LiteralPath $p) { $det += "след активатора: $p" }
+        }
+        foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { "$($_.TaskName)$($_.TaskPath)" -match '(?i)AAct|KMSAuto|KMSpico|KMS_VL|Activation-Renewal|Online_KMS|SvcRestartTask_KMS' })) { $det += "задача активатора: $($t.TaskPath)$($t.TaskName)" }
+        $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $st = ''
+        if ($lic.Count) {
+            $names = @{ 0 = 'не активирована'; 1 = 'активирована'; 2 = 'льготный период'; 3 = 'льготный период'; 4 = 'льготный период'; 5 = 'требуется активация'; 6 = 'льготный период' }
+            $st = $names[[int]$lic[0].LicenseStatus]
+            $ch = "$($lic[0].Description)" -replace '^.*,\s*', ''
+            $det = @("канал лицензии: $ch") + $det
+            if ($lic[0].GracePeriodRemaining -gt 0) { $det += "до следующей переактивации: $([math]::Round($lic[0].GracePeriodRemaining / 1440)) дн." }
+        }
+        Add-Finding -Level INFO -Title "Активация Windows: $st" -Detail $det
+    }
+}
+
+# ================================================================ 2. ЗАЩИТА
+$script:FixRealtime = {
+    param($f)
+    Set-MpPreference -DisableRealtimeMonitoring $false
+    Start-Sleep -Seconds 2
+    if (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) { throw 'защита не включилась (мешает политика или другой антивирус) - включи в "Безопасность Windows > Защита от вирусов и угроз"' }
+    Add-Change 'defender' 'realtime protection enabled'
+    return 'защита в реальном времени включена'
+}
+$script:FixSignatures = {
+    param($f)
+    Update-MpSignature
+    Add-Change 'defender' 'signatures updated'
+    return "базы обновлены: $((Get-MpComputerStatus).AntivirusSignatureLastUpdated)"
+}
+$script:FixPua = {
+    param($f)
+    Set-MpPreference -PUAProtection Enabled
+    Add-Change 'defender' 'PUA protection enabled'
+    return 'блокировка нежелательных программ включена'
+}
+$script:FixExclusion = {
+    param($f)
+    $v = $f.Data.Value
+    switch ($f.Data.Kind) {
+        'Path' { Remove-MpPreference -ExclusionPath $v }
+        'Process' { Remove-MpPreference -ExclusionProcess $v }
+        'Extension' { Remove-MpPreference -ExclusionExtension $v }
+        'IpAddress' { Remove-MpPreference -ExclusionIpAddress $v }
+    }
+    Add-Change 'defender exclusion removed' "$($f.Data.Kind)`t$v"
+    return 'исключение убрано'
+}
+$script:FixQuickScan = {
+    param($f)
+    Start-MpScan -ScanType QuickScan
+    Add-Change 'defender' 'quick scan run'
+    return 'быстрая проверка выполнена'
+}
+$script:FixThreats = {
+    param($f)
+    Remove-MpThreat
+    Add-Change 'defender' 'Remove-MpThreat (default actions applied to active threats)'
+    return 'к активным угрозам применены действия Defender; после этого запусти полную проверку'
+}
+$script:FixRegValueRemove = {
+    param($f)
+    Remove-RegValueSafe $f.Data.Path $f.Data.Name
+    return 'значение удалено (старое сохранено в backup\registry_before.tsv)'
+}
+$script:FixRegValueSet = {
+    param($f)
+    $type = 'DWord'; if ($f.Data.Type) { $type = $f.Data.Type }
+    Set-RegValueSafe $f.Data.Path $f.Data.Name $f.Data.Value $type
+    return "установлено $($f.Data.Name) = $($f.Data.Value)"
+}
+$script:FixFirewall = {
+    param($f)
+    Set-NetFirewallProfile -Name $f.Data.Names -Enabled True
+    Add-Change 'firewall enabled' ($f.Data.Names -join ',')
+    return 'брандмауэр включён'
+}
+$script:FixSmb1 = {
+    param($f)
+    Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -Confirm:$false
+    Add-Change 'smb1 disabled' 'Set-SmbServerConfiguration -EnableSMB1Protocol false'
+    return 'SMB1 выключен'
+}
+
+function Invoke-ProtectionChecks {
+    Start-Section 'Защита'
+    $script:ThirdAv = @()
+
+    Invoke-Check 'какой антивирус работает' {
+        $av = @()
+        try { $av = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction Stop) } catch { }
+        foreach ($a in $av) {
+            $on = (([int]$a.productState) -band 0x1000) -ne 0
+            $fresh = (([int]$a.productState) -band 0x10) -eq 0
+            $isDef = ("$($a.displayName)" -match '(?i)Defender')
+            if (-not $isDef -and $on) { $script:ThirdAv += "$($a.displayName)" }
+            if (-not $isDef) {
+                $st = 'выключен'; if ($on) { $st = 'включён' }
+                $fr = 'базы устарели'; if ($fresh) { $fr = 'базы свежие' }
+                $lvl = 'INFO'; $man = ''
+                if ($on -and -not $fresh) { $lvl = 'WARN'; $man = 'обновить базы антивируса или удалить его - тогда включится встроенный Defender' }
+                if ("$($a.displayName)" -match '(?i)Kaspersky|Касперск|Dr\.?Web|360 Total|Avast|AVG|McAfee|Norton') {
+                    Add-Finding -Level WARN -Title "Сторонний антивирус: $($a.displayName) ($st, $fr)" -Detail @('такие антивирусы ставят свой корневой сертификат и вскрывают HTTPS; встроенного Defender хватает') -Manual 'решить, нужен ли он; удалять через Параметры > Приложения'
+                } else {
+                    Add-Finding -Level $lvl -Title "Сторонний антивирус: $($a.displayName) ($st, $fr)" -Manual $man
+                }
+            }
+        }
+    }
+
+    Invoke-Check 'Microsoft Defender' {
+        $mp = $null
+        try { $mp = Get-MpComputerStatus -ErrorAction Stop } catch { }
+        if ($null -eq $mp) {
+            if ($script:ThirdAv.Count) { Add-Finding -Level INFO -Title "Defender не отвечает - работает $($script:ThirdAv -join ', ')" }
+            else { Add-Finding -Level BAD -Title 'Defender не отвечает, и другого антивируса не видно' -Manual 'открыть "Безопасность Windows"; если не открывается - это признак заражения или поломки' }
+            return
+        }
+        $passive = ("$($mp.AMRunningMode)" -match '(?i)Passive') -or ($script:ThirdAv.Count -gt 0)
+        if ($passive) {
+            Add-Finding -Level INFO -Title "Defender в пассивном режиме, основной антивирус: $($script:ThirdAv -join ', ')"
+        } else {
+            if (-not $mp.AntivirusEnabled) { Add-Finding -Level BAD -Title 'Defender выключен' -Manual 'Безопасность Windows > Защита от вирусов и угроз > включить' }
+            elseif (-not $mp.RealTimeProtectionEnabled) { Add-Finding -Level BAD -Title 'Защита в реальном времени выключена' -Fix $script:FixRealtime -FixText 'включить защиту в реальном времени' }
+            else { Add-Finding -Level OK -Title 'Defender работает, защита в реальном времени включена' }
+            if (-not $mp.IsTamperProtected) { Add-Finding -Level WARN -Title 'Защита от подделки (Tamper Protection) выключена' -Manual 'Безопасность Windows > Защита от вирусов и угроз > Управление настройками > Защита от подделки' }
+            else { Add-Finding -Level OK -Title 'Защита от подделки включена' }
+        }
+        $age = 9999
+        if ($mp.AntivirusSignatureLastUpdated) { $age = [int]((Get-Date) - $mp.AntivirusSignatureLastUpdated).TotalDays }
+        if (-not $passive) {
+            if ($age -gt 30) { Add-Finding -Level BAD -Title "Антивирусные базы очень старые ($age дн.)" -Fix $script:FixSignatures -FixText 'обновить базы Defender' }
+            elseif ($age -gt 7) { Add-Finding -Level WARN -Title "Антивирусные базы устарели ($age дн.)" -Fix $script:FixSignatures -FixText 'обновить базы Defender' }
+            else { Add-Finding -Level OK -Title "Антивирусные базы свежие (обновлены $($mp.AntivirusSignatureLastUpdated.ToString('dd.MM.yyyy')))" }
+            $qa = [double]$mp.QuickScanAge
+            if ($qa -gt 100000) { Add-Finding -Level WARN -Title 'Быстрая проверка Defender не запускалась ни разу' -Fix $script:FixQuickScan -FixText 'запустить быструю проверку (несколько минут)' }
+            elseif ($qa -gt 14) { Add-Finding -Level WARN -Title "Быстрая проверка была $qa дн. назад" -Fix $script:FixQuickScan -FixText 'запустить быструю проверку (несколько минут)' }
+            $fa = [double]$mp.FullScanAge
+            if ($fa -gt 100000) { Add-Finding -Level INFO -Title 'Полная проверка Defender не запускалась ни разу' -Detail @('запуск: Start-MpScan -ScanType FullScan (идёт час-два)') }
+            else { Add-Finding -Level INFO -Title "Полная проверка Defender была $fa дн. назад" }
+        }
+    }
+
+    Invoke-Check 'исключения и настройки Defender' {
+        $pref = $null
+        try { $pref = Get-MpPreference -ErrorAction Stop } catch { }
+        if ($null -eq $pref) { return }
+        $n = 0
+        $kinds = @(@{ K = 'Path'; V = $pref.ExclusionPath; T = 'папка/файл' }, @{ K = 'Process'; V = $pref.ExclusionProcess; T = 'процесс' }, @{ K = 'Extension'; V = $pref.ExclusionExtension; T = 'расширение' }, @{ K = 'IpAddress'; V = $pref.ExclusionIpAddress; T = 'адрес' })
+        foreach ($k in $kinds) {
+            foreach ($v in @($k.V | Where-Object { $_ })) {
+                $n++
+                $dead = $false
+                if ($k.K -eq 'Path' -and (Test-FullPath "$v") -and -not (Test-DriveMissing "$v") -and -not (Test-Path -LiteralPath "$v")) { $dead = $true }
+                if ($dead) {
+                    Add-Finding -Level WARN -Title "Исключение Defender на несуществующий путь: $v" -Fix $script:FixExclusion -FixText 'убрать исключение' -Data @{ Kind = $k.K; Value = "$v" }
+                } else {
+                    Add-Finding -Level BAD -Title "Исключение Defender ($($k.T)): $v" -Detail @('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') -Fix $script:FixExclusion -FixText 'убрать исключение (файлы не трогаются; Defender может потом сам удалить то, что там найдёт)' -Data @{ Kind = $k.K; Value = "$v" }
+                }
+            }
+        }
+        if ($n -eq 0) { Add-Finding -Level OK -Title 'Исключений Defender нет' }
+        if ($script:ThirdAv.Count -eq 0) {
+            if ([int]$pref.PUAProtection -ne 1) { Add-Finding -Level WARN -Title 'Блокировка потенциально нежелательных программ выключена' -Fix $script:FixPua -FixText 'включить PUA-защиту' }
+            else { Add-Finding -Level OK -Title 'Блокировка потенциально нежелательных программ включена' }
+        }
+    }
+
+    Invoke-Check 'политики, отключающие Defender' {
+        $root = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+        $pairs = @(
+            @{ P = $root; N = 'DisableAntiSpyware' }, @{ P = $root; N = 'DisableAntiVirus' },
+            @{ P = "$root\Real-Time Protection"; N = 'DisableRealtimeMonitoring' }, @{ P = "$root\Real-Time Protection"; N = 'DisableBehaviorMonitoring' },
+            @{ P = "$root\Real-Time Protection"; N = 'DisableOnAccessProtection' }, @{ P = "$root\Real-Time Protection"; N = 'DisableScanOnRealtimeEnable' },
+            @{ P = "$root\Real-Time Protection"; N = 'DisableIOAVProtection' }, @{ P = "$root\Spynet"; N = 'DisableBlockAtFirstSeen' }
+        )
+        $bad = 0
+        foreach ($p in $pairs) {
+            $v = Get-RegValue $p.P $p.N
+            if ($null -ne $v -and "$v" -eq '1') {
+                $bad++
+                Add-Finding -Level BAD -Title "Политика отключает Defender: $($p.N)" -Detail @((ConvertTo-NativeRegPath $p.P)) -Fix $script:FixRegValueRemove -FixText 'удалить это значение из реестра' -Data @{ Path = $p.P; Name = $p.N }
+            }
+        }
+        if ($bad -eq 0) { Add-Finding -Level OK -Title 'Политик, отключающих Defender, нет' }
+    }
+
+    Invoke-Check 'найденные угрозы' {
+        $active = @()
+        try { $active = @(Get-MpThreat -ErrorAction Stop | Where-Object { $_.IsActive }) } catch { }
+        if ($active.Count) {
+            Add-Finding -Level BAD -Title "Defender видит активные угрозы: $($active.Count)" -Detail @($active | ForEach-Object { "$($_.ThreatName)" } | Sort-Object -Unique) -Fix $script:FixThreats -FixText 'применить действия Defender к активным угрозам (карантин/удаление)' -Manual 'потом полная проверка: Start-MpScan -ScanType FullScan'
+        }
+        $recent = @()
+        try { $recent = @(Get-MpThreatDetection -ErrorAction Stop | Where-Object { $_.InitialDetectionTime -gt (Get-Date).AddDays(-60) }) } catch { }
+        if ($recent.Count) {
+            $names = @{}
+            try { foreach ($t in @(Get-MpThreat -ErrorAction Stop)) { $names["$($t.ThreatID)"] = "$($t.ThreatName)" } } catch { }
+            $det = @($recent | Sort-Object InitialDetectionTime -Descending | Select-Object -First 15 | ForEach-Object { "$($_.InitialDetectionTime.ToString('dd.MM.yyyy HH:mm')) $($names["$($_.ThreatID)"])" })
+            Add-Finding -Level WARN -Title "За последние 60 дней Defender что-то ловил: $($recent.Count) срабатываний" -Detail $det -Manual 'Безопасность Windows > Журнал защиты - посмотреть, что это было и откуда'
+        } elseif ($active.Count -eq 0) {
+            Add-Finding -Level OK -Title 'Активных угроз нет, за 60 дней срабатываний не было'
+        }
+    }
+
+    Invoke-Check 'брандмауэр' {
+        $off = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { "$($_.Enabled)" -ne 'True' })
+        $fw3 = @()
+        try { $fw3 = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName FirewallProduct -ErrorAction Stop | Where-Object { (([int]$_.productState) -band 0x1000) -ne 0 }) } catch { }
+        if ($off.Count -eq 0) { Add-Finding -Level OK -Title 'Брандмауэр Windows включён во всех профилях' }
+        elseif ($fw3.Count) { Add-Finding -Level INFO -Title "Брандмауэр Windows выключен, работает сторонний: $(($fw3 | ForEach-Object { $_.displayName }) -join ', ')" }
+        else { Add-Finding -Level BAD -Title "Брандмауэр Windows выключен: $(($off | ForEach-Object { $_.Name }) -join ', ')" -Fix $script:FixFirewall -FixText 'включить брандмауэр' -Data @{ Names = @($off | ForEach-Object { "$($_.Name)" }) } }
+    }
+
+    Invoke-Check 'контроль учётных записей (UAC)' {
+        $pol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+        $lua = Get-RegValue $pol 'EnableLUA'
+        if ($null -ne $lua -and [int]$lua -eq 0) {
+            Add-Finding -Level BAD -Title 'UAC выключен: любая программа получает права администратора без вопроса' -Fix $script:FixRegValueSet -FixText 'включить UAC (нужна перезагрузка)' -Data @{ Path = $pol; Name = 'EnableLUA'; Value = 1 } -NeedsReboot
+        } else {
+            $cpa = Get-RegValue $pol 'ConsentPromptBehaviorAdmin'
+            if ($null -ne $cpa -and [int]$cpa -eq 0) { Add-Finding -Level WARN -Title 'UAC не спрашивает подтверждения (повышение прав молча)' -Fix $script:FixRegValueSet -FixText 'вернуть стандартный запрос UAC' -Data @{ Path = $pol; Name = 'ConsentPromptBehaviorAdmin'; Value = 5 } }
+            else { Add-Finding -Level OK -Title 'UAC включён' }
+        }
+    }
+
+    Invoke-Check 'SmartScreen' {
+        $v1 = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'SmartScreenEnabled'
+        $v2 = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen'
+        if ("$v1" -eq 'Off' -or ($null -ne $v2 -and "$v2" -eq '0')) { Add-Finding -Level WARN -Title 'SmartScreen (проверка скачанных программ) выключен' -Manual 'Безопасность Windows > Управление приложениями и браузером > Защита на основе репутации > включить' }
+        else { Add-Finding -Level OK -Title 'SmartScreen не выключен' }
+    }
+
+    Invoke-Check 'устаревший протокол SMB1' {
+        $smb = $null
+        try { $smb = Get-SmbServerConfiguration -ErrorAction Stop } catch { }
+        if ($null -eq $smb) { return }
+        if ($smb.EnableSMB1Protocol) { Add-Finding -Level WARN -Title 'Включён дырявый протокол SMB1 (через него распространялся WannaCry)' -Fix $script:FixSmb1 -FixText 'выключить SMB1 (старые сетевые диски/принтеры до 2008 года могут перестать открываться)' }
+        else { Add-Finding -Level OK -Title 'SMB1 выключен' }
+    }
+}
