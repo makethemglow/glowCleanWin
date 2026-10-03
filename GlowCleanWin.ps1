@@ -50,7 +50,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
-$script:Version = '0.9 от 2026-10-03'
+$script:Version = '1.0 от 2026-10-03'
 $script:IsWin = ($env:OS -eq 'Windows_NT')
 $script:DemoMode = [bool]$Demo
 $script:SkipUpdates = [bool]$SkipUpdates
