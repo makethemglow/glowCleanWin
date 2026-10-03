@@ -199,7 +199,7 @@ if ($Clean) { Set-Content (Join-Path $ffp 'prefs.js') 'user_pref("security.enter
 else {
     Set-Content (Join-Path $ffp 'prefs.js') 'user_pref("browser.x", 1);'
     [IO.File]::WriteAllBytes((Join-Path $ffp 'cert9.db'), ([byte[]](1..200) + [byte[]](6, 3, 0x55, 4, 3, 0x0C, 28) + [Text.Encoding]::ASCII.GetBytes('Example Interception Root CA') + [byte[]](1..50)))
-    Set-Content (Join-Path $ffp 'logins.json') '{"logins":[{"id":1},{"id":2}]}'
+    Set-Content (Join-Path $ffp 'logins.json') '{"logins":[{"id":1,"encryptedPassword":"x"},{"id":2,"encryptedPassword":"y"},{"id":3}]}'
     $st = Join-Path $prof 'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup'
     New-Item -ItemType Directory -Path $st -Force | Out-Null
     Set-Content (Join-Path $st 'run.vbs') 'x'
