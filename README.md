@@ -2,7 +2,17 @@
 
 Проверка и лечение домашнего ПК с Windows 10/11 одним скриптом PowerShell. Сначала он только читает и показывает, что хорошо, а что плохо. Потом один раз спрашивает, что исправить.
 
-> **In English.** A single Windows PowerShell 5.1 script that audits a home Windows 10/11 PC: updates, Defender, certificate stores, browsers, hosts/proxy/DNS, autoruns, accounts, preinstalled apps and telemetry settings. It prints a colour-coded report and then asks once what to fix. Every change is backed up and journaled. The interface is in Russian. A special focus is on trusted root certificates that are not part of the Microsoft and Mozilla trust programs and allow HTTPS interception.
+> **In English.** A single Windows PowerShell 5.1 script that audits a home Windows 10/11 PC: updates, Defender, certificate stores, browsers, hosts/proxy/DNS, autoruns, accounts, preinstalled apps and telemetry settings. It prints a colour-coded report and then asks once what to fix. Every change is backed up and journaled. The interface is in Russian. A special focus is on trusted root certificates that are not part of the Microsoft and Mozilla trust programs and allow HTTPS interception. No dependencies and no telemetry: the code makes no network requests of its own. If an antivirus flags the repository, see the note below: the tests contain a truncated, non-executable sample of a malicious autorun command as test data.
+
+## Коротко, до запуска
+
+- **Работает без интернета.** В коде нет ни одного сетевого запроса: скрипт ничего не скачивает и никуда не отправляет. В сеть при его работе может обращаться только сама Windows: поиск обновлений (отключается `-SkipUpdates`), обновление баз Defender (только если выбрать это исправление) и проверка цифровых подписей файлов.
+- **Без зависимостей.** Нужен только Windows PowerShell 5.1, встроенный в Windows 10 и 11. Скрипт ничего не устанавливает; для запуска достаточно двух файлов: `GlowCleanWin.ps1` и `GlowCleanWin.cmd`.
+- **Без телеметрии.** Отчёт, журнал и копии остаются в папке рядом со скриптом.
+- **Правки с копией и журналом.** Перед первой правкой создаётся точка восстановления. Сертификаты, значения реестра, файлы и задачи планировщика перед изменением или удалением копируются в `backup`, каждое действие записывается в журнал. У удалённых встроенных приложений копии нет: они возвращаются из Microsoft Store.
+
+> [!NOTE]
+> **Если антивирус ругается на этот репозиторий.** Скрипт ищет следы вредоносных программ, поэтому в нём и в тестах есть их приметы: названия опасных команд и оборванный на полуслове образец закодированной команды автозапуска (`tests/MockWindows.ps1`, `tests/Unit.ps1`). Это текст, на котором проверяется, что скрипт пометит такую запись красным. Он нигде не выполняется, а сам обрывок выполнить нельзя. Антивирус может принять эти строки за угрозу. Для работы скрипта папка `tests` не нужна.
 
 ## Зачем
 
