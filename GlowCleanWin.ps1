@@ -532,8 +532,10 @@ function Invoke-SystemChecks {
         $hf = @(Get-HotFix -ErrorAction SilentlyContinue | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn)
         if ($hf.Count -eq 0) { Add-Finding -Level INFO -Title 'Не удалось определить дату последнего обновления Windows'; return }
         $last = $hf[-1]
-        $days = [int]((Get-Date) - $last.InstalledOn).TotalDays
-        $t = "последнее обновление Windows: $($last.InstalledOn.ToString('dd.MM.yyyy')) ($($last.HotFixID)), $days дн. назад"
+        # дата установки приходит без времени: считаем целые календарные дни, сегодня - это 0
+        $days = [int][math]::Floor(((Get-Date).Date - $last.InstalledOn.Date).TotalDays)
+        $ago = "$days дн. назад"; if ($days -le 0) { $ago = 'сегодня' }
+        $t = "последнее обновление Windows: $($last.InstalledOn.ToString('dd.MM.yyyy')) ($($last.HotFixID)), $ago"
         if ($days -gt 100) { Add-Finding -Level BAD -Title "Windows давно не обновлялась - $t" -Manual 'Параметры > Центр обновления Windows > Проверить наличие обновлений; повторять до "Вы используете последнюю версию"' }
         elseif ($days -gt 45) { Add-Finding -Level WARN -Title "Обновления запаздывают - $t" -Manual 'Параметры > Центр обновления Windows > Проверить наличие обновлений' }
         else { Add-Finding -Level OK -Title "Обновления ставятся - $t" }
