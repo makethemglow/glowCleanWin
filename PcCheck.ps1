@@ -1420,6 +1420,12 @@ function Invoke-AutorunChecks {
                 $risk = Get-CommandRisk $cmd
                 if ($inMs -and $risk -ne 'BAD' -and ((Test-MsSigned $sg) -or $sg -eq 'FILE NOT FOUND' -or $sg -eq 'no path')) { continue }
                 $det = @("файл: $exe ($(Get-SignerText $sg))", "состояние: $($t.State); автор: $($t.Author)")
+                $dead = ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe"))
+                if ("$($t.State)" -eq 'Disabled' -and -not $dead) {
+                    # отключённая задача не запускается; показываем только как справку
+                    if ($risk -or -not (Test-ValidSigned $sg)) { $fine += "ОТКЛЮЧЕНА: $full -> $(Hide-Secrets $cmd 80)" }
+                    continue
+                }
                 if ($risk -eq 'BAD') {
                     $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
                     Add-Finding -Level BAD -Title "Задача планировщика похожа на вредоносную: $full" -Detail (@("команда: $(Hide-Secrets $cmd)") + $det) -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если сам такого не настраивал - отключить по номеру и запустить полную проверку Defender'
