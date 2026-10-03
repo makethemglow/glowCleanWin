@@ -1343,6 +1343,7 @@ function Invoke-AutorunChecks {
         foreach ($up in @(Get-AllProfiles)) { $dirs += @{ D = (Join-P $up.Profile 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'); T = $up.Name } }
         $fine = @(); $flag = 0
         foreach ($d in $dirs) {
+            if (-not $d.D) { continue }
             foreach ($f in @(Get-ChildItem -LiteralPath $d.D -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' })) {
                 $data = @{ Paths = @($f.FullName) }
                 if ($f.Extension -eq '.lnk') {
