@@ -220,7 +220,9 @@ function Add-Change {
     if ($script:DemoMode) { return }
     try { [IO.File]::AppendAllText($script:JournalFile, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false))) } catch { }
     # в отчёт - только что и где; сами значения (в них бывают ключи) остаются в журнале и в backup
-    Out-ReportOnly "       журнал: $Type | $(Hide-Secrets ((@($What -split "`t") | Select-Object -First 2) -join ' | ') 200)"
+    $echo = (@($What -split "`t") | Select-Object -First 2) -join ' | '
+    if ($echo.Length -gt 200) { $echo = $echo.Substring(0, 200) + '...' }
+    Out-ReportOnly "       журнал: $Type | $echo"
 }
 function Backup-File {
     param([string]$Path)
