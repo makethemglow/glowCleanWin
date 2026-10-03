@@ -44,6 +44,12 @@ $script:IsWin = ($env:OS -eq 'Windows_NT')
 $script:DemoMode = [bool]$Demo
 $script:SkipUpdates = [bool]$SkipUpdates
 
+function Join-P {
+    # как Join-Path, но не падает, если диска из пути сейчас нет
+    param([string]$Parent, [string]$Child)
+    if ($script:IsWin -or $Parent -match '\\') { return ($Parent.TrimEnd('\') + '\' + $Child.TrimStart('\')) }
+    return [IO.Path]::Combine($Parent, $Child)
+}
 function Test-Admin {
     if (-not $script:IsWin) { return $false }
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -55,8 +61,8 @@ if ($script:IsWin -and -not $LoadOnly -and -not $Demo -and -not $Relaunched) {
     $is32 = ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess)
     $needHost = ($PSVersionTable.PSEdition -eq 'Core') -or $is32
     if ($needElev -or $needHost) {
-        $exe = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        if ($is32 -and -not $needElev) { $exe = Join-Path $env:windir 'sysnative\WindowsPowerShell\v1.0\powershell.exe' }
+        $exe = Join-P $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if ($is32 -and -not $needElev) { $exe = Join-P $env:windir 'sysnative\WindowsPowerShell\v1.0\powershell.exe' }
         $argLine = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -Relaunched'
         if ($ReportOnly) { $argLine += ' -ReportOnly' }
         if ($SkipUpdates) { $argLine += ' -SkipUpdates' }
@@ -87,7 +93,7 @@ $script:UserHives = @()
 $script:Programs = @()
 $script:Ctx = $null
 $script:HostsPath = ''
-if ($script:IsWin) { $script:HostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts' }
+if ($script:IsWin) { $script:HostsPath = Join-P $env:SystemRoot 'System32\drivers\etc\hosts' }
 
 $script:LevelMeta = @{
     OK   = @{ Tag = '[ OK ]'; Color = 'Green' }
@@ -178,7 +184,7 @@ function Get-BackupDir {
 }
 function Add-BackupLine {
     param([string]$File, [string]$Line)
-    [IO.File]::AppendAllText((Join-Path (Get-BackupDir) $File), $Line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    [IO.File]::AppendAllText((Join-P (Get-BackupDir) $File), $Line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
 }
 function Add-Change {
     param([string]$Type, [string]$What)
@@ -188,10 +194,10 @@ function Add-Change {
 }
 function Backup-File {
     param([string]$Path)
-    $dir = Join-Path (Get-BackupDir) 'files'
+    $dir = Join-P (Get-BackupDir) 'files'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $n = @(Get-ChildItem -LiteralPath $dir -Force).Count + 1
-    $dst = Join-Path $dir ('{0:d3}_{1}' -f $n, (Split-Path $Path -Leaf))
+    $dst = Join-P $dir ('{0:d3}_{1}' -f $n, (Split-Path $Path -Leaf))
     Copy-Item -LiteralPath $Path -Destination $dst -Force
     Add-BackupLine 'files_before.tsv' "$dst`t$Path"
     return $dst
@@ -206,7 +212,7 @@ function ConvertTo-NativeRegPath {
 }
 function Export-RegKey {
     param([string]$Path, [string]$FileName)
-    $dst = Join-Path (Get-BackupDir) $FileName
+    $dst = Join-P (Get-BackupDir) $FileName
     & reg.exe export (ConvertTo-NativeRegPath $Path) $dst /y 2>&1 | Out-Null
     return $dst
 }
@@ -285,10 +291,10 @@ function Get-ExePath {
     $c = $Cmd.Trim()
     if ($UserProfile) {
         $c = Set-EnvText $c '%USERPROFILE%' $UserProfile
-        $c = Set-EnvText $c '%LOCALAPPDATA%' (Join-Path $UserProfile 'AppData\Local')
-        $c = Set-EnvText $c '%APPDATA%' (Join-Path $UserProfile 'AppData\Roaming')
-        $c = Set-EnvText $c '%TEMP%' (Join-Path $UserProfile 'AppData\Local\Temp')
-        $c = Set-EnvText $c '%TMP%' (Join-Path $UserProfile 'AppData\Local\Temp')
+        $c = Set-EnvText $c '%LOCALAPPDATA%' (Join-P $UserProfile 'AppData\Local')
+        $c = Set-EnvText $c '%APPDATA%' (Join-P $UserProfile 'AppData\Roaming')
+        $c = Set-EnvText $c '%TEMP%' (Join-P $UserProfile 'AppData\Local\Temp')
+        $c = Set-EnvText $c '%TMP%' (Join-P $UserProfile 'AppData\Local\Temp')
     }
     $c = [Environment]::ExpandEnvironmentVariables($c)
     $c = $c -replace '^\\\?\?\\', ''
@@ -921,9 +927,9 @@ function Get-CertLines {
 $script:FixRemoveCert = {
     param($f)
     $d = $f.Data
-    $dir = Join-Path (Get-BackupDir) 'certs'
+    $dir = Join-P (Get-BackupDir) 'certs'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [IO.File]::WriteAllBytes((Join-Path $dir "$($d.Store)_$($d.Thumb).cer"), $d.Der)
+    [IO.File]::WriteAllBytes((Join-P $dir "$($d.Store)_$($d.Thumb).cer"), $d.Der)
     $n = 0
     foreach ($kp in $d.RegPaths) {
         if (Test-Path -LiteralPath $kp) {
@@ -1010,7 +1016,7 @@ function Invoke-CertificateChecks {
 # ================================================================ 4. БРАУЗЕРЫ
 $script:FixFirefoxRoots = {
     param($f)
-    $uj = Join-Path $f.Data.Profile 'user.js'
+    $uj = Join-P $f.Data.Profile 'user.js'
     $lines = @()
     if (Test-Path -LiteralPath $uj) {
         Backup-File $uj | Out-Null
@@ -1044,15 +1050,15 @@ function Invoke-BrowserChecks {
     Invoke-Check 'Firefox: профили' {
         $found = 0
         foreach ($up in $profiles) {
-            $root = Join-Path $up.Profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
+            $root = Join-P $up.Profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
             foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
-                $prefs = Join-Path $d.FullName 'prefs.js'
+                $prefs = Join-P $d.FullName 'prefs.js'
                 if (-not (Test-Path -LiteralPath $prefs)) { continue }
                 $found++
                 $tag = "Firefox, профиль $($d.Name) ($($up.Name))"
                 $state = $null
                 foreach ($pf in @('prefs.js', 'user.js')) {
-                    $fp = Join-Path $d.FullName $pf
+                    $fp = Join-P $d.FullName $pf
                     if (Test-Path -LiteralPath $fp) {
                         $m = Select-String -LiteralPath $fp -Pattern 'user_pref\("security\.enterprise_roots\.enabled",\s*(true|false)\)' -ErrorAction SilentlyContinue | Select-Object -Last 1
                         if ($m) { $state = $m.Matches[0].Groups[1].Value }
@@ -1065,7 +1071,7 @@ function Invoke-BrowserChecks {
                     Add-Finding -Level WARN -Title "$tag - доверяет всем сертификатам, добавленным в Windows ($why)" -Detail @('Настройки > Приватность и защита > Сертификаты > "Разрешить Firefox автоматически доверять сторонним корневым сертификатам"') `
                         -Fix $script:FixFirefoxRoots -FixText 'выключить это доверие (строка в user.js профиля)' -Data @{ Profile = $d.FullName }
                 }
-                $db = Join-Path $d.FullName 'cert9.db'
+                $db = Join-P $d.FullName 'cert9.db'
                 if (Test-Path -LiteralPath $db) {
                     $txt = ''
                     try {
@@ -1082,7 +1088,7 @@ function Invoke-BrowserChecks {
                         Add-Finding -Level OK -Title "$tag - в собственной базе сертификатов вне программ доверия нет"
                     }
                 }
-                $lj = Join-Path $d.FullName 'logins.json'
+                $lj = Join-P $d.FullName 'logins.json'
                 if (Test-Path -LiteralPath $lj) {
                     $cnt = 0
                     try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins).Count } catch { }
@@ -1098,11 +1104,11 @@ function Invoke-BrowserChecks {
         foreach ($p in @($script:Programs | Where-Object { $_.Name -match '(?i)Firefox' -and $_.Location })) { $dirs += $p.Location.TrimEnd('\') }
         $kasper = Test-Installed '(?i)Kaspersky|Касперск'
         foreach ($base in @($dirs | Sort-Object -Unique)) {
-            if (-not (Test-Path -LiteralPath (Join-Path $base 'firefox.exe'))) { continue }
+            if (-not (Test-Path -LiteralPath (Join-P $base 'firefox.exe'))) { continue }
             $extra = @()
-            $extra += @(Get-ChildItem -LiteralPath (Join-Path $base 'defaults\pref') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'channel-prefs.js' })
+            $extra += @(Get-ChildItem -LiteralPath (Join-P $base 'defaults\pref') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'channel-prefs.js' })
             $extra += @(Get-ChildItem -LiteralPath $base -File -Force -Filter '*.cfg' -ErrorAction SilentlyContinue)
-            $extra += @(Get-ChildItem -LiteralPath (Join-Path $base 'distribution') -File -Force -Filter 'policies.json' -ErrorAction SilentlyContinue)
+            $extra += @(Get-ChildItem -LiteralPath (Join-P $base 'distribution') -File -Force -Filter 'policies.json' -ErrorAction SilentlyContinue)
             if ($extra.Count -eq 0) { Add-Finding -Level OK -Title "Firefox ($base): чужих файлов настроек нет"; continue }
             $kl = @($extra | Where-Object { $_.Name -match '^kl_' })
             $other = @($extra | Where-Object { $_.Name -notmatch '^kl_' })
@@ -1124,7 +1130,7 @@ function Invoke-BrowserChecks {
 
     Invoke-Check 'браузеры с собственным списком доверенных сертификатов' {
         $ya = Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom|^Atom$'
-        foreach ($up in $profiles) { if (Test-Path -LiteralPath (Join-Path $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
+        foreach ($up in $profiles) { if (Test-Path -LiteralPath (Join-P $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
         $ya = @($ya | Sort-Object -Unique)
         if ($ya.Count) {
             Add-Finding -Level INFO -Title 'Установлен браузер с собственным списком доверенных сертификатов' -Detail ($ya + @('он доверяет дополнительным корневым сертификатам независимо от хранилища Windows - проверка хранилища на него не распространяется'))
@@ -1268,10 +1274,10 @@ $script:FixRemoveRunValue = {
 }
 $script:FixRemoveTask = {
     param($f)
-    $dir = Join-Path (Get-BackupDir) 'tasks'
+    $dir = Join-P (Get-BackupDir) 'tasks'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $safe = ("$($f.Data.TaskPath)$($f.Data.TaskName)" -replace '[\\/:*?"<>|]', '_')
-    (Export-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName) | Out-File -FilePath (Join-Path $dir "$safe.xml") -Encoding unicode
+    (Export-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName) | Out-File -FilePath (Join-P $dir "$safe.xml") -Encoding unicode
     if ($f.Data.DisableOnly) {
         Disable-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName | Out-Null
         Add-Change 'task disabled' "$($f.Data.TaskPath)$($f.Data.TaskName)"
@@ -1334,7 +1340,7 @@ function Invoke-AutorunChecks {
 
     Invoke-Check 'папки автозагрузки' {
         $dirs = @(@{ D = [Environment]::GetFolderPath('CommonStartup'); T = 'для всех' })
-        foreach ($up in @(Get-AllProfiles)) { $dirs += @{ D = (Join-Path $up.Profile 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'); T = $up.Name } }
+        foreach ($up in @(Get-AllProfiles)) { $dirs += @{ D = (Join-P $up.Profile 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'); T = $up.Name } }
         $fine = @(); $flag = 0
         foreach ($d in $dirs) {
             foreach ($f in @(Get-ChildItem -LiteralPath $d.D -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' })) {
@@ -1443,7 +1449,7 @@ function Invoke-AutorunChecks {
         $shell = "$(Get-RegValue $wl 'Shell')".Trim()
         if ($shell -and $shell -ine 'explorer.exe') { $bad++; Add-Finding -Level BAD -Title "Вместо Проводника при входе запускается: $(Hide-Secrets $shell)" -Fix $script:FixRegValueSet -FixText 'вернуть explorer.exe' -Data @{ Path = $wl; Name = 'Shell'; Value = 'explorer.exe'; Type = 'String' } }
         $ui = "$(Get-RegValue $wl 'Userinit')".Trim().TrimEnd(',').Trim()
-        $uiDef = Join-Path $env:SystemRoot 'system32\userinit.exe'
+        $uiDef = Join-P $env:SystemRoot 'system32\userinit.exe'
         if ($ui -and $ui -ine $uiDef -and $ui -ine 'userinit.exe') { $bad++; Add-Finding -Level BAD -Title "При входе в систему запускается посторонняя программа (Userinit): $(Hide-Secrets $ui)" -Fix $script:FixRegValueSet -FixText 'вернуть стандартное значение' -Data @{ Path = $wl; Name = 'Userinit'; Value = "$uiDef,"; Type = 'String' } }
         foreach ($h in $script:UserHives) {
             $k = "$($h.Hive)\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
@@ -1829,18 +1835,18 @@ function Initialize-RunFolder {
     $name = "$env:COMPUTERNAME"; if (-not $name) { $name = 'PC' }
     $stamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
     $candidates = @()
-    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot 'PcCheck_Reports') }
-    if ($script:IsWin) { $candidates += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PcCheck_Reports') }
-    $candidates += (Join-Path ([IO.Path]::GetTempPath()) 'PcCheck_Reports')
+    if ($PSScriptRoot) { $candidates += (Join-P $PSScriptRoot 'PcCheck_Reports') }
+    if ($script:IsWin) { $candidates += (Join-P ([Environment]::GetFolderPath('Desktop')) 'PcCheck_Reports') }
+    $candidates += (Join-P ([IO.Path]::GetTempPath()) 'PcCheck_Reports')
     foreach ($base in $candidates) {
         try {
-            $run = Join-Path $base "${name}_$stamp"
+            $run = Join-P $base "${name}_$stamp"
             New-Item -ItemType Directory -Path $run -Force -ErrorAction Stop | Out-Null
             $script:RunDir = $run
-            $script:ReportFile = Join-Path $run 'report.txt'
-            $script:BackupDir = Join-Path $run 'backup'
-            $script:JournalFile = Join-Path $base "${name}_changes.tsv"
-            $ig = Join-Path $base "${name}_ignore.txt"
+            $script:ReportFile = Join-P $run 'report.txt'
+            $script:BackupDir = Join-P $run 'backup'
+            $script:JournalFile = Join-P $base "${name}_changes.tsv"
+            $ig = Join-P $base "${name}_ignore.txt"
             if (Test-Path -LiteralPath $ig) { $script:IgnoreList = @(Get-Content -LiteralPath $ig -Encoding UTF8 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch '^#' }) }
             return
         } catch { }
