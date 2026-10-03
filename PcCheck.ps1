@@ -1137,3 +1137,397 @@ function Invoke-BrowserChecks {
         }
     }
 }
+
+# ================================================================ 5. СЕТЬ
+function Get-HostsEntries {
+    param([string[]]$Lines)
+    $out = @(); $n = 0
+    foreach ($l in $Lines) {
+        $n++
+        $t = ("$l" -replace '#.*$', '').Trim()
+        if (-not $t) { continue }
+        $parts = @($t -split '\s+')
+        if ($parts.Count -lt 2) { continue }
+        $out += [pscustomobject]@{ LineNo = $n; Ip = $parts[0]; Names = @($parts[1..($parts.Count - 1)]) }
+    }
+    return $out
+}
+function Get-HostsVerdict {
+    # SECURITY = глушит сайты защиты и обновлений; REDIRECT = уводит сайт на чужой адрес; LICENSE = блокировка проверки лицензий; BLOCK = прочие блокировки; LOCAL = обычные локальные записи
+    param($Entry)
+    $names = ($Entry.Names -join ' ')
+    $sink = ("$($Entry.Ip)" -match '^(0\.0\.0\.0|127\.\d+\.\d+\.\d+|::1?|0:0:0:0:0:0:0:[01])$')
+    if ($sink) {
+        if ($names -match '(?i)^(localhost|[\w-]+\.localhost|ip6-localhost|ip6-loopback|[\w.-]*\.local|[\w.-]*\.test|[\w.-]*\.internal|host\.docker\.internal|kubernetes\.docker\.internal)$') { return 'LOCAL' }
+        if ($names -match '(?i)(kaspersky|drweb|eset\.|avast|avg\.com|bitdefender|malwarebytes|virustotal|windowsupdate|update\.microsoft|wdcp\.microsoft|defender|norton|mcafee|sophos|trendmicro|f-secure|emsisoft|avira|comodo|virusradar|esetnod32)') { return 'SECURITY' }
+        if ($names -match '(?i)(adobe|autodesk|corel|activat|licens|genuine|macromedia|sls\.microsoft|validation)') { return 'LICENSE' }
+        return 'BLOCK'
+    }
+    if (Test-PrivateIp $Entry.Ip) { return 'LOCAL' }
+    return 'REDIRECT'
+}
+$script:FixHostsLines = {
+    param($f)
+    $p = $script:HostsPath
+    Backup-File $p | Out-Null
+    $lines = @(Get-Content -LiteralPath $p)
+    $n = 0
+    foreach ($i in @($f.Data.LineNos)) {
+        if ($i -ge 1 -and $i -le $lines.Count -and $lines[$i - 1] -notmatch '^\s*#') { $lines[$i - 1] = '# [PcCheck] ' + $lines[$i - 1]; $n++ }
+    }
+    $it = Get-Item -LiteralPath $p -Force
+    if ($it.IsReadOnly) { $it.IsReadOnly = $false }
+    [IO.File]::WriteAllLines($p, [string[]]$lines, [Text.Encoding]::Default)
+    Add-Change 'hosts lines disabled' "строки: $(@($f.Data.LineNos) -join ',')"
+    return "отключено строк: $n (закомментированы, копия файла в backup\files)"
+}
+$script:FixProxy = {
+    param($f)
+    $k = $f.Data.Key
+    if ($f.Data.Pac) { Remove-RegValueSafe $k 'AutoConfigURL' }
+    if ($f.Data.Proxy) { Set-RegValueSafe $k 'ProxyEnable' 0 'DWord' }
+    return 'прокси отключён (адрес сохранён в backup\registry_before.tsv)'
+}
+
+function Invoke-NetworkChecks {
+    Start-Section 'Сеть'
+
+    Invoke-Check 'файл hosts' {
+        if (-not (Test-Path -LiteralPath $script:HostsPath)) { Add-Finding -Level INFO -Title 'Файла hosts нет (это допустимо)'; return }
+        $entries = @(Get-HostsEntries @(Get-Content -LiteralPath $script:HostsPath))
+        $g = @{ SECURITY = @(); REDIRECT = @(); LICENSE = @(); BLOCK = @(); LOCAL = @() }
+        foreach ($e in $entries) { $g[(Get-HostsVerdict $e)] += $e }
+        if ($g.SECURITY.Count) {
+            Add-Finding -Level BAD -Title "hosts глушит сайты антивирусов и обновлений: $($g.SECURITY.Count) строк" -Detail @($g.SECURITY | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) `
+                -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.SECURITY | ForEach-Object { $_.LineNo }) }
+        }
+        if ($g.REDIRECT.Count) {
+            Add-Finding -Level BAD -Title "hosts уводит сайты на посторонние адреса: $($g.REDIRECT.Count) строк" -Detail (@($g.REDIRECT | ForEach-Object { "строка $($_.LineNo): $($_.Ip) $($_.Names -join ' ')" }) + @('так воруют пароли: набираешь адрес банка, а попадаешь на подделку')) `
+                -Fix $script:FixHostsLines -FixText 'закомментировать эти строки (копия hosts сохраняется)' -Data @{ LineNos = @($g.REDIRECT | ForEach-Object { $_.LineNo }) }
+        }
+        if ($g.LICENSE.Count) { Add-Finding -Level INFO -Title "hosts: блокировка серверов проверки лицензий - $($g.LICENSE.Count) строк (решение за хозяином компьютера)" -Detail @($g.LICENSE | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
+        if ($g.BLOCK.Count) { Add-Finding -Level INFO -Title "hosts: прочие блокировки сайтов - $($g.BLOCK.Count) строк" -Detail @($g.BLOCK | Select-Object -First 5 | ForEach-Object { "$($_.Ip) $($_.Names -join ' ')" }) }
+        if ($g.SECURITY.Count + $g.REDIRECT.Count -eq 0) { Add-Finding -Level OK -Title 'hosts: подмен адресов и блокировок антивирусов нет' }
+    }
+
+    Invoke-Check 'прокси' {
+        $any = $false
+        foreach ($h in $script:UserHives) {
+            $k = "$($h.Hive)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            $en = Get-RegValue $k 'ProxyEnable'; $srv = Get-RegValue $k 'ProxyServer'; $pac = Get-RegValue $k 'AutoConfigURL'
+            $on = ($null -ne $en -and [int]$en -eq 1 -and $srv)
+            if ($pac) {
+                $any = $true
+                Add-Finding -Level BAD -Title "Весь трафик идёт через сценарий автонастройки прокси ($($h.Name))" -Detail @("адрес сценария: $pac", 'так вредные программы пропускают через себя банковские сайты') -Fix $script:FixProxy -FixText 'убрать сценарий автонастройки' -Data @{ Key = $k; Pac = $true; Proxy = $false }
+            }
+            if ($on) {
+                $any = $true
+                $local = ("$srv" -match '(?i)(^|=|//)(127\.0\.0\.1|localhost|\[::1\])[:;]')
+                if ($local) { Add-Finding -Level WARN -Title "Включён локальный прокси ($($h.Name)): $srv" -Detail @('обычно это VPN-клиент или антивирус на этом же компьютере') -Fix $script:FixProxy -FixText 'выключить системный прокси' -Data @{ Key = $k; Pac = $false; Proxy = $true } -Explicit }
+                else { Add-Finding -Level WARN -Title "Трафик браузеров идёт через прокси ($($h.Name)): $srv" -Fix $script:FixProxy -FixText 'выключить системный прокси' -Data @{ Key = $k; Pac = $false; Proxy = $true } -Manual 'если прокси не настраивал сам - выключить' }
+            }
+        }
+        if (-not $any) { Add-Finding -Level OK -Title 'Системный прокси не используется' }
+    }
+
+    Invoke-Check 'DNS-серверы' {
+        $known = @{
+            '1.1.1.1' = 'Cloudflare'; '1.0.0.1' = 'Cloudflare'; '1.1.1.2' = 'Cloudflare'; '1.0.0.2' = 'Cloudflare'; '8.8.8.8' = 'Google'; '8.8.4.4' = 'Google'; '9.9.9.9' = 'Quad9'; '149.112.112.112' = 'Quad9'
+            '208.67.222.222' = 'OpenDNS'; '208.67.220.220' = 'OpenDNS'; '94.140.14.14' = 'AdGuard'; '94.140.15.15' = 'AdGuard'; '76.76.2.0' = 'ControlD'; '76.76.10.0' = 'ControlD'
+            '77.88.8.8' = 'Яндекс'; '77.88.8.1' = 'Яндекс'; '77.88.8.88' = 'Яндекс'; '77.88.8.2' = 'Яндекс'; '77.88.8.7' = 'Яндекс'; '77.88.8.3' = 'Яндекс'
+            '2606:4700:4700::1111' = 'Cloudflare'; '2606:4700:4700::1001' = 'Cloudflare'; '2001:4860:4860::8888' = 'Google'; '2001:4860:4860::8844' = 'Google'; '2620:fe::fe' = 'Quad9'; '2620:fe::9' = 'Quad9'
+        }
+        $up = @{}
+        try { foreach ($a in @(Get-NetAdapter -ErrorAction Stop | Where-Object { "$($_.Status)" -eq 'Up' })) { $up[[int]$a.ifIndex] = $a.Name } } catch { }
+        $lines = @(); $unknown = @()
+        foreach ($a in @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses })) {
+            if ($up.Count -and -not $up.ContainsKey([int]$a.InterfaceIndex)) { continue }
+            foreach ($ip in $a.ServerAddresses) {
+                if ("$ip" -match '^fec0:') { continue }
+                $who = 'роутер/локальная сеть'
+                if (-not (Test-PrivateIp $ip)) { if ($known.ContainsKey("$ip")) { $who = $known["$ip"] } else { $who = 'НЕИЗВЕСТНЫЙ'; $unknown += "$ip ($($a.InterfaceAlias))" } }
+                $lines += "$($a.InterfaceAlias): $ip - $who"
+            }
+        }
+        $lines = @($lines | Sort-Object -Unique)
+        if ($unknown.Count) { Add-Finding -Level WARN -Title "Незнакомые DNS-серверы: $(($unknown | Sort-Object -Unique) -join ', ')" -Detail ($lines + @('DNS-сервер решает, на какой адрес тебя отправить по имени сайта; чужой DNS может подменять сайты')) -Manual 'если это не DNS провайдера или VPN - вернуть "Получать автоматически" в свойствах сетевого подключения' }
+        else { Add-Finding -Level OK -Title 'DNS-серверы обычные' -Detail $lines }
+    }
+}
+
+# ================================================================ 6. АВТОЗАПУСК
+$script:FixRemoveRunValue = {
+    param($f)
+    Remove-RegValueSafe $f.Data.Path $f.Data.Name
+    return 'запись автозапуска удалена (сам файл не тронут; старое значение в backup\registry_before.tsv)'
+}
+$script:FixRemoveTask = {
+    param($f)
+    $dir = Join-Path (Get-BackupDir) 'tasks'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $safe = ("$($f.Data.TaskPath)$($f.Data.TaskName)" -replace '[\\/:*?"<>|]', '_')
+    (Export-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName) | Out-File -FilePath (Join-Path $dir "$safe.xml") -Encoding unicode
+    if ($f.Data.DisableOnly) {
+        Disable-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName | Out-Null
+        Add-Change 'task disabled' "$($f.Data.TaskPath)$($f.Data.TaskName)"
+        return 'задача отключена (не удалена; копия в backup\tasks)'
+    }
+    Unregister-ScheduledTask -TaskPath $f.Data.TaskPath -TaskName $f.Data.TaskName -Confirm:$false
+    Add-Change 'task removed' "$($f.Data.TaskPath)$($f.Data.TaskName)"
+    return 'задача удалена (копия в backup\tasks, вернуть: Register-ScheduledTask -Xml)'
+}
+
+function Invoke-AutorunChecks {
+    Start-Section 'Автозапуск'
+
+    Invoke-Check 'автозапуск из реестра (Run)' {
+        $keys = @(
+            @{ P = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; U = ''; T = 'для всех' },
+            @{ P = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'; U = ''; T = 'для всех, однократно' },
+            @{ P = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; U = ''; T = 'для всех, 32 бита' },
+            @{ P = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce'; U = ''; T = 'для всех, 32 бита, однократно' },
+            @{ P = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'; U = ''; T = 'политика' }
+        )
+        foreach ($h in $script:UserHives) {
+            $keys += @{ P = "$($h.Hive)\Software\Microsoft\Windows\CurrentVersion\Run"; U = $h.Profile; T = $h.Name }
+            $keys += @{ P = "$($h.Hive)\Software\Microsoft\Windows\CurrentVersion\RunOnce"; U = $h.Profile; T = "$($h.Name), однократно" }
+            $keys += @{ P = "$($h.Hive)\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"; U = $h.Profile; T = "$($h.Name), политика" }
+        }
+        $fine = @(); $flag = 0
+        foreach ($k in $keys) {
+            if (-not (Test-Path -LiteralPath $k.P)) { continue }
+            $item = Get-Item -LiteralPath $k.P
+            foreach ($n in $item.GetValueNames()) {
+                if (-not $n) { continue }
+                $v = "$($item.GetValue($n, '', 'DoNotExpandEnvironmentNames'))"
+                if (-not $v.Trim()) { continue }
+                $exe = Get-ExePath $v $k.U
+                $sg = Get-Signer $exe
+                $risk = Get-CommandRisk $v
+                $data = @{ Path = $k.P; Name = $n }
+                $det = @("файл: $exe ($(Get-SignerText $sg))", "где: $(ConvertTo-NativeRegPath $k.P)")
+                if ($risk -eq 'BAD') {
+                    $flag++
+                    Add-Finding -Level BAD -Title "Автозапуск похож на вредоносный: $n ($($k.T))" -Detail (@("команда: $(Hide-Secrets $v)") + $det) -Fix $script:FixRemoveRunValue -FixText 'удалить запись автозапуска' -Data $data -Explicit -Manual 'если сам такого не настраивал - удалить по номеру и запустить полную проверку Defender'
+                } elseif ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe")) {
+                    $flag++
+                    Add-Finding -Level WARN -Title "Автозапуск ведёт на несуществующий файл: $n ($($k.T))" -Detail $det -Fix $script:FixRemoveRunValue -FixText 'удалить мёртвую запись' -Data $data
+                } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and (Test-UserWritablePath "$exe")) {
+                    $flag++
+                    Add-Finding -Level WARN -Title "В автозапуске неподписанная программа из пользовательской папки: $n ($($k.T))" -Detail $det -Fix $script:FixRemoveRunValue -FixText 'убрать из автозапуска (файл не удаляется)' -Data $data -Explicit -Manual 'если программа незнакома - убрать по номеру'
+                } elseif ($risk -eq 'WARN') {
+                    $flag++
+                    Add-Finding -Level WARN -Title "Автозапуск через сценарий: $n ($($k.T))" -Detail (@("команда: $(Hide-Secrets $v)") + $det) -Fix $script:FixRemoveRunValue -FixText 'убрать из автозапуска' -Data $data -Explicit -Manual 'если сам такого не настраивал - показать отчёт'
+                } else {
+                    $fine += "$n -> $exe ($(Get-SignerText $sg)) [$($k.T)]"
+                }
+            }
+        }
+        if ($fine.Count) { Add-Finding -Level INFO -Title "Автозапуск из реестра: записей без замечаний - $($fine.Count)" -Detail $fine }
+        if ($flag -eq 0) { Add-Finding -Level OK -Title 'Автозапуск из реестра: подозрительного нет' }
+    }
+
+    Invoke-Check 'папки автозагрузки' {
+        $dirs = @(@{ D = [Environment]::GetFolderPath('CommonStartup'); T = 'для всех' })
+        foreach ($up in @(Get-AllProfiles)) { $dirs += @{ D = (Join-Path $up.Profile 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'); T = $up.Name } }
+        $fine = @(); $flag = 0
+        foreach ($d in $dirs) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $d.D -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' })) {
+                $data = @{ Paths = @($f.FullName) }
+                if ($f.Extension -eq '.lnk') {
+                    $tg = Get-LnkTarget $f.FullName
+                    $sg = Get-Signer $tg
+                    if ($tg -and $sg -eq 'FILE NOT FOUND' -and (Test-FullPath $tg) -and -not (Test-DriveMissing $tg)) {
+                        $flag++
+                        Add-Finding -Level WARN -Title "Ярлык в автозагрузке ведёт на несуществующий файл: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать мёртвый ярлык (копия в backup)' -Data $data
+                    } elseif ($tg -and -not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and (Test-UserWritablePath $tg)) {
+                        $flag++
+                        Add-Finding -Level WARN -Title "В автозагрузке неподписанная программа из пользовательской папки: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать ярлык из автозагрузки (копия в backup)' -Data $data -Explicit
+                    } else { $fine += "$($f.Name) -> $tg ($(Get-SignerText $sg)) [$($d.T)]" }
+                } elseif ($f.Extension -match '(?i)^\.(vbs|vbe|js|jse|wsf|hta|bat|cmd|ps1|scr|pif|com)$') {
+                    $flag++
+                    Add-Finding -Level BAD -Title "В автозагрузке лежит сценарий: $($f.Name) ($($d.T))" -Detail @($f.FullName, "изменён $($f.LastWriteTime.ToString('dd.MM.yyyy HH:mm'))") -Fix $script:FixMoveFile -FixText 'убрать файл из автозагрузки (копия в backup)' -Data $data -Explicit -Manual 'если сам его туда не клал - убрать по номеру'
+                } else {
+                    $sg = Get-Signer $f.FullName
+                    if ($f.Extension -eq '.exe' -and -not (Test-ValidSigned $sg)) {
+                        $flag++
+                        Add-Finding -Level WARN -Title "В автозагрузке неподписанная программа: $($f.Name) ($($d.T))" -Detail @($f.FullName) -Fix $script:FixMoveFile -FixText 'убрать файл из автозагрузки (копия в backup)' -Data $data -Explicit
+                    } else { $fine += "$($f.Name) [$($d.T)]" }
+                }
+            }
+        }
+        if ($fine.Count) { Add-Finding -Level INFO -Title "Папки автозагрузки: без замечаний - $($fine.Count)" -Detail $fine }
+        if ($flag -eq 0) { Add-Finding -Level OK -Title 'Папки автозагрузки: подозрительного нет' }
+    }
+
+    Invoke-Check 'задачи планировщика' {
+        $fine = @(); $flag = 0
+        foreach ($t in @(Get-ScheduledTask | Sort-Object TaskPath, TaskName)) {
+            $inMs = ($t.TaskPath -like '\Microsoft\*')
+            $full = "$($t.TaskPath)$($t.TaskName)"
+            $data = @{ TaskPath = "$($t.TaskPath)"; TaskName = "$($t.TaskName)"; DisableOnly = $false }
+            foreach ($a in @($t.Actions)) {
+                if (-not ($a.PSObject.Properties.Name -contains 'Execute') -or -not $a.Execute) { continue }
+                $cmd = "$($a.Execute) $($a.Arguments)"
+                $exe = Get-ExePath "$($a.Execute)"
+                $sg = Get-Signer $exe
+                $risk = Get-CommandRisk $cmd
+                if ($inMs -and $risk -ne 'BAD' -and ((Test-MsSigned $sg) -or $sg -eq 'FILE NOT FOUND' -or $sg -eq 'no path')) { continue }
+                $det = @("файл: $exe ($(Get-SignerText $sg))", "состояние: $($t.State); автор: $($t.Author)")
+                if ($risk -eq 'BAD') {
+                    $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
+                    Add-Finding -Level BAD -Title "Задача планировщика похожа на вредоносную: $full" -Detail (@("команда: $(Hide-Secrets $cmd)") + $det) -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если сам такого не настраивал - отключить по номеру и запустить полную проверку Defender'
+                } elseif ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe") -and -not (Test-DriveMissing "$exe")) {
+                    $flag++
+                    Add-Finding -Level WARN -Title "Задача планировщика запускает несуществующий файл: $full" -Detail $det -Fix $script:FixRemoveTask -FixText 'удалить мёртвую задачу (копия XML в backup)' -Data $data
+                } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path' -and (Test-UserWritablePath "$exe")) {
+                    $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
+                    Add-Finding -Level WARN -Title "Задача запускает неподписанную программу из пользовательской папки: $full" -Detail $det -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если программа незнакома - отключить по номеру'
+                } elseif ($risk -eq 'WARN' -and -not $inMs) {
+                    $flag++; $d2 = $data.Clone(); $d2.DisableOnly = $true
+                    Add-Finding -Level WARN -Title "Задача запускает сценарий: $full" -Detail (@("команда: $(Hide-Secrets $cmd)") + $det) -Fix $script:FixRemoveTask -FixText 'отключить задачу' -Data $d2 -Explicit -Manual 'если сам такого не настраивал - показать отчёт'
+                } elseif ($inMs) {
+                    $flag++
+                    Add-Finding -Level WARN -Title "В системной папке задач \Microsoft\ чужая программа: $full" -Detail $det -Manual 'показать отчёт'
+                } else { $fine += "$full -> $exe ($(Get-SignerText $sg))" }
+            }
+        }
+        if ($fine.Count) { Add-Finding -Level INFO -Title "Задачи планировщика от программ: без замечаний - $($fine.Count)" -Detail $fine }
+        if ($flag -eq 0) { Add-Finding -Level OK -Title 'Планировщик: подозрительных задач нет' }
+    }
+
+    Invoke-Check 'службы' {
+        $fine = @(); $flag = 0
+        foreach ($s in @(Get-CimInstance Win32_Service | Sort-Object Name)) {
+            $exe = Get-ExePath "$($s.PathName)"
+            $sg = Get-Signer $exe
+            if (Test-MsSigned $sg) { continue }
+            $det = @("файл: $exe ($(Get-SignerText $sg))", "запуск: $($s.StartMode); сейчас: $($s.State)")
+            if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
+                if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Manual "от администратора: sc.exe delete `"$($s.Name)`"" }
+            } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
+                $flag++
+                $lvl = 'WARN'; if (Test-UserWritablePath "$exe") { $lvl = 'BAD' }
+                Add-Finding -Level $lvl -Title "Служба с неподписанным файлом: $($s.Name) ($($s.DisplayName))" -Detail $det -Manual 'выяснить, что это за программа; если незнакома - показать отчёт'
+            } else { $fine += "$($s.Name) -> $exe ($(Get-SignerText $sg))" }
+        }
+        if ($fine.Count) { Add-Finding -Level INFO -Title "Службы сторонних программ: без замечаний - $($fine.Count)" -Detail $fine }
+        if ($flag -eq 0) { Add-Finding -Level OK -Title 'Службы: подозрительного нет' }
+    }
+
+    Invoke-Check 'драйверы' {
+        $flag = 0; $n = 0
+        foreach ($d in @(Get-CimInstance Win32_SystemDriver | Sort-Object Name)) {
+            $exe = Get-ExePath "$($d.PathName)"
+            $sg = Get-Signer $exe
+            if (Test-MsSigned $sg) { continue }
+            $n++
+            if ($sg -eq 'FILE NOT FOUND' -and (Test-FullPath "$exe")) {
+                if ("$($d.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Драйвер без файла (остаток удалённой программы): $($d.Name)" -Detail @("файл: $exe") -Manual "от администратора: sc.exe delete `"$($d.Name)`"" }
+            } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
+                $flag++
+                Add-Finding -Level WARN -Title "Драйвер с неподписанным файлом: $($d.Name)" -Detail @("файл: $exe ($(Get-SignerText $sg))") -Manual 'показать отчёт'
+            }
+        }
+        if ($flag -eq 0) { Add-Finding -Level OK -Title "Драйверы: все сторонние ($n) подписаны, мёртвых нет" }
+    }
+
+    Invoke-Check 'подмена оболочки и перехват запуска программ' {
+        $bad = 0
+        $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        $shell = "$(Get-RegValue $wl 'Shell')".Trim()
+        if ($shell -and $shell -ine 'explorer.exe') { $bad++; Add-Finding -Level BAD -Title "Вместо Проводника при входе запускается: $(Hide-Secrets $shell)" -Fix $script:FixRegValueSet -FixText 'вернуть explorer.exe' -Data @{ Path = $wl; Name = 'Shell'; Value = 'explorer.exe'; Type = 'String' } }
+        $ui = "$(Get-RegValue $wl 'Userinit')".Trim().TrimEnd(',').Trim()
+        $uiDef = Join-Path $env:SystemRoot 'system32\userinit.exe'
+        if ($ui -and $ui -ine $uiDef -and $ui -ine 'userinit.exe') { $bad++; Add-Finding -Level BAD -Title "При входе в систему запускается посторонняя программа (Userinit): $(Hide-Secrets $ui)" -Fix $script:FixRegValueSet -FixText 'вернуть стандартное значение' -Data @{ Path = $wl; Name = 'Userinit'; Value = "$uiDef,"; Type = 'String' } }
+        foreach ($h in $script:UserHives) {
+            $k = "$($h.Hive)\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
+            $us = Get-RegValue $k 'Shell'
+            if ($us) { $bad++; Add-Finding -Level BAD -Title "У пользователя $($h.Name) подменена оболочка: $(Hide-Secrets "$us")" -Fix $script:FixRegValueRemove -FixText 'удалить подмену' -Data @{ Path = $k; Name = 'Shell' } }
+        }
+        foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Windows')) {
+            $ai = "$(Get-RegValue $k 'AppInit_DLLs')".Trim()
+            if ($ai) { $bad++; Add-Finding -Level BAD -Title "В каждую программу подгружается посторонняя библиотека (AppInit_DLLs): $ai" -Detail @((ConvertTo-NativeRegPath $k)) -Fix $script:FixRegValueSet -FixText 'очистить AppInit_DLLs' -Data @{ Path = $k; Name = 'AppInit_DLLs'; Value = ''; Type = 'String' } -Explicit -Manual 'показать отчёт; так делают и вирусы, и некоторые старые антивирусы' }
+        }
+        foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options')) {
+            foreach ($k in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+                $dbg = Get-RegValue $k.PSPath 'Debugger'
+                if (-not $dbg) { continue }
+                $bad++
+                $data = @{ Path = $k.PSPath; Name = 'Debugger' }
+                if ($k.PSChildName -match '(?i)^(sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe$') {
+                    Add-Finding -Level BAD -Title "Чёрный ход на экране входа: вместо $($k.PSChildName) запускается $(Hide-Secrets "$dbg")" -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data
+                } elseif ($k.PSChildName -match '(?i)(MsMpEng|MpCmdRun|SecurityHealth|msmpeng|avp|taskmgr|regedit|msconfig|procexp|autoruns|rstrui)') {
+                    Add-Finding -Level BAD -Title "Перехвачен запуск $($k.PSChildName): вместо неё стартует $(Hide-Secrets "$dbg")" -Detail @('так вирусы не дают запустить антивирус и диспетчер задач (а Process Explorer так честно заменяет диспетчер задач)') -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data -Explicit
+                } else {
+                    Add-Finding -Level WARN -Title "Перехвачен запуск $($k.PSChildName): вместо неё стартует $(Hide-Secrets "$dbg")" -Fix $script:FixRegValueRemove -FixText 'удалить перехват' -Data $data -Explicit
+                }
+            }
+        }
+        if ($bad -eq 0) { Add-Finding -Level OK -Title 'Оболочка и запуск программ не перехвачены' }
+    }
+
+    Invoke-Check 'скрытый автозапуск через WMI' {
+        $std = '(?i)^(SCM Event Log (Filter|Consumer)|BVT(Filter|Consumer))$'
+        $cons = @(Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer -ErrorAction SilentlyContinue | Where-Object { "$($_.Name)" -notmatch $std })
+        $act = @($cons | Where-Object { $_.CimClass.CimClassName -match 'CommandLineEventConsumer|ActiveScriptEventConsumer' })
+        if ($act.Count) {
+            Add-Finding -Level WARN -Title "Есть скрытый автозапуск через WMI: $($act.Count)" -Detail @($act | ForEach-Object { "$($_.CimClass.CimClassName): $($_.Name) | $(Hide-Secrets "$($_.CommandLineTemplate)$($_.ScriptFileName)")" }) -Manual 'редкий способ; им пользуются вирусы и иногда утилиты производителя ноутбука. Показать отчёт'
+        } else { Add-Finding -Level OK -Title 'Скрытого автозапуска через WMI нет' }
+    }
+}
+
+# ================================================================ 7. УЧЁТНЫЕ ЗАПИСИ И УДАЛЁННЫЙ ДОСТУП
+$script:RemoteToolsRx = '(?i)(AnyDesk|TeamViewer|RustDesk|Ammyy|Remote Utilities|Remote Manipulator|RMS (Host|Viewer|Удал)|LiteManager|Radmin|UltraVNC|TightVNC|RealVNC|VNC Server|TigerVNC|Supremo|AeroAdmin|ScreenConnect|ConnectWise|LogMeIn|GoToAssist|GoTo Resolve|GoToMyPC|Splashtop|Atera|NetSupport|Getscreen|RuDesktop|DWAgent|DWService|MeshAgent|Mesh Agent|Chrome Remote Desktop|Удаленный рабочий стол Chrome|Parsec|HopToDesk|Iperius Remote|Zoho Assist|UltraViewer|NoMachine|AweSun|ToDesk|SimpleHelp|Action1|Tactical RMM|ZeroTier|Tailscale|Hamachi|Ассистент)'
+$script:FixDisableUser = {
+    param($f)
+    Disable-LocalUser -SID $f.Data.Sid
+    Add-Change 'local user disabled' "$($f.Data.Name)"
+    return 'учётная запись отключена'
+}
+
+function Invoke-AccountChecks {
+    Start-Section 'Учётные записи и удалённый доступ'
+
+    Invoke-Check 'пользователи и администраторы' {
+        $users = @(Get-LocalUser)
+        $det = @()
+        foreach ($u in $users) {
+            if (-not $u.Enabled) { continue }
+            $ll = 'никогда'; if ($u.LastLogon) { $ll = $u.LastLogon.ToString('dd.MM.yyyy') }
+            $det += "$($u.Name) (последний вход: $ll)"
+            if ("$($u.SID)" -match '-501$') { Add-Finding -Level WARN -Title "Включена учётная запись Гость ($($u.Name))" -Fix $script:FixDisableUser -FixText 'отключить Гостя' -Data @{ Sid = "$($u.SID)"; Name = "$($u.Name)" } }
+            if ("$($u.SID)" -match '-500$') { Add-Finding -Level WARN -Title "Включена встроенная учётная запись Администратор ($($u.Name))" -Detail @('у неё нет запроса UAC; её часто включают активаторы и "помощники"') -Fix $script:FixDisableUser -FixText 'отключить встроенного Администратора' -Data @{ Sid = "$($u.SID)"; Name = "$($u.Name)" } -Explicit -Manual 'убедиться, что есть другая учётная запись с правами администратора, и отключить по номеру' }
+        }
+        Add-Finding -Level INFO -Title "Включённых учётных записей: $($det.Count)" -Detail $det
+        $adm = @()
+        try { $adm = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { "$($_.Name)" }) } catch { }
+        if ($adm.Count) { Add-Finding -Level INFO -Title "Администраторы: $($adm -join ', ')" }
+        $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        if ("$(Get-RegValue $wl 'AutoAdminLogon')" -eq '1' -and $null -ne (Get-RegValue $wl 'DefaultPassword')) {
+            Add-Finding -Level WARN -Title 'Автоматический вход: пароль учётной записи лежит в реестре открытым текстом' -Manual 'netplwiz > вернуть галочку "Требовать ввод имени пользователя и пароля"'
+        }
+    }
+
+    Invoke-Check 'удалённый рабочий стол и удалённые службы' {
+        $ts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+        $deny = Get-RegValue $ts 'fDenyTSConnections'
+        if ($null -ne $deny -and [int]$deny -eq 0) { Add-Finding -Level WARN -Title 'Включён удалённый рабочий стол (RDP)' -Fix $script:FixRegValueSet -FixText 'выключить удалённый рабочий стол' -Data @{ Path = $ts; Name = 'fDenyTSConnections'; Value = 1 } -Manual 'если не пользуешься - выключить' }
+        else { Add-Finding -Level OK -Title 'Удалённый рабочий стол выключен' }
+        $ra = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' 'fAllowToGetHelp'
+        if ($null -ne $ra -and [int]$ra -eq 1) { Add-Finding -Level INFO -Title 'Удалённый помощник Windows разрешён (работает только по приглашению)' }
+        foreach ($s in @(Get-Service -Name sshd, WinRM, RemoteRegistry, TlntSvr -ErrorAction SilentlyContinue | Where-Object { "$($_.Status)" -eq 'Running' })) {
+            Add-Finding -Level WARN -Title "Работает служба удалённого управления: $($s.Name) ($($s.DisplayName))" -Manual 'если не настраивал сам: services.msc > остановить и поставить тип запуска "Отключена"'
+        }
+    }
+
+    Invoke-Check 'программы удалённого доступа' {
+        $tools = @(Get-InstalledNames $script:RemoteToolsRx)
+        foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Name) $($_.DisplayName)" -match $script:RemoteToolsRx })) { $tools += "служба $($s.Name) ($($s.State))" }
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { "$($_.ProcessName)" -match $script:RemoteToolsRx } | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)) { $tools += "запущен процесс $p" }
+        $tools = @($tools | Sort-Object -Unique)
+        if ($tools.Count) {
+            Add-Finding -Level WARN -Title 'Установлены программы удалённого доступа' -Detail ($tools + @('через них компьютером управляют издалека; это главный инструмент телефонных мошенников')) -Manual 'оставить только то, что ставил сам и чем пользуешься; остальное удалить (Параметры > Приложения)'
+        } else { Add-Finding -Level OK -Title 'Программ удалённого доступа нет' }
+    }
+}
