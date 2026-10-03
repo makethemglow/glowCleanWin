@@ -1531,3 +1531,383 @@ function Invoke-AccountChecks {
         } else { Add-Finding -Level OK -Title 'Программ удалённого доступа нет' }
     }
 }
+
+# ================================================================ 8. ПРОГРАММЫ
+function Invoke-ProgramChecks {
+    Start-Section 'Программы'
+
+    Invoke-Check 'навязанные и нежелательные программы' {
+        $pup = @(Get-InstalledNames '(?i)(DriverPack|Driver Booster|Driver Easy|DriverMax|IObit|Advanced SystemCare|MediaGet|Zona\b|uTorrent|BitTorrent|Амиго|Amigo|Спутник@Mail|Mail\.Ru Агент|Агент Mail\.Ru|Guard@Mail|Кнопка .Яндекс|Менеджер браузеров|Browser Manager|Яндекс\.?\s?Элементы|WebAdvisor|ByteFence|Segurazo|PC Accelerate|OneLaunch|Wave Browser|PC App Store|Web Companion|Reimage|Restoro|MyCleanPC|Slimware|WinZip Driver|Avast Secure Browser|AVG Secure Browser|Opera GX Assistant|Hola VPN|TLauncher|KMSAuto|KMSpico|AAct)')
+        if ($pup.Count) { Add-Finding -Level WARN -Title "Навязанные и нежелательные программы: $($pup.Count)" -Detail $pup -Manual 'удалить через Параметры > Приложения > Установленные приложения' }
+        else { Add-Finding -Level OK -Title 'Известных навязанных программ нет' }
+    }
+
+    Invoke-Check 'общий список' {
+        $vis = @($script:Programs | Where-Object { -not $_.Hidden })
+        Add-Finding -Level INFO -Title "Установленных программ: $($vis.Count) (полный список - в report.txt)" -Detail @()
+        Out-ReportOnly ''
+        Out-ReportOnly '--- установленные программы ---'
+        foreach ($p in ($vis | Sort-Object Name)) { Out-ReportOnly "  $($p.Name) | $($p.Version) | $($p.Publisher)" }
+        Out-ReportOnly ''
+    }
+}
+
+# ================================================================ 9. РЕКЛАМА И СЛЕЖКА WINDOWS
+$script:PromoApps = @(
+    'Microsoft.BingNews', 'Microsoft.BingSearch', 'Microsoft.Copilot', 'Microsoft.MicrosoftOfficeHub', 'Clipchamp.Clipchamp', 'Microsoft.PowerAutomateDesktop',
+    'Microsoft.Windows.DevHome', 'Microsoft.WindowsFeedbackHub', 'Microsoft.Edge.GameAssist', 'Microsoft.549981C3F5F10', 'Microsoft.MixedReality.Portal',
+    'Microsoft.Microsoft3DViewer', 'Microsoft.3DBuilder', 'Microsoft.Print3D', 'Microsoft.Getstarted', 'Microsoft.Messaging', 'Microsoft.OneConnect', 'Microsoft.SkypeApp',
+    'MicrosoftTeams', 'Microsoft.StartExperiencesApp', '7EE7776C.LinkedInforWindows', 'king.com.*', '*.TikTok', 'Facebook.Facebook', 'Disney.*', 'AmazonVideo.PrimeVideo',
+    '*CandyCrush*', '*BubbleWitch*', '*.Netflix', '*HiddenCity*', '*MarchofEmpires*', '*.Twitter', 'Microsoft.MicrosoftJournal', 'MicrosoftCorporationII.MicrosoftFamily'
+)
+function Test-PromoName { param([string]$Name) foreach ($pat in $script:PromoApps) { if ($Name -like $pat) { return $true } }; return $false }
+
+function Get-PrivacySettings {
+    $u = $script:Ctx.MainHive
+    $cdm = "$u\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+    return @(
+        @{ P = $cdm; N = 'SilentInstalledAppsEnabled'; V = 0; D = 'тихая установка рекламных приложений' },
+        @{ P = $cdm; N = 'PreInstalledAppsEnabled'; V = 0; D = 'предустановка рекламных приложений' },
+        @{ P = $cdm; N = 'OemPreInstalledAppsEnabled'; V = 0; D = 'рекламные приложения производителя' },
+        @{ P = $cdm; N = 'SoftLandingEnabled'; V = 0; D = 'советы и предложения' },
+        @{ P = $cdm; N = 'SystemPaneSuggestionsEnabled'; V = 0; D = 'предложения в меню Пуск' },
+        @{ P = $cdm; N = 'RotatingLockScreenOverlayEnabled'; V = 0; D = 'реклама на экране блокировки (картинка остаётся)' },
+        @{ P = $cdm; N = 'SubscribedContent-310093Enabled'; V = 0; D = 'экран "Добро пожаловать" после обновлений' },
+        @{ P = $cdm; N = 'SubscribedContent-338387Enabled'; V = 0; D = 'факты и советы на экране блокировки' },
+        @{ P = $cdm; N = 'SubscribedContent-338388Enabled'; V = 0; D = 'предложения в Пуске' },
+        @{ P = $cdm; N = 'SubscribedContent-338389Enabled'; V = 0; D = 'советы по использованию Windows' },
+        @{ P = $cdm; N = 'SubscribedContent-338393Enabled'; V = 0; D = 'предложения в Параметрах' },
+        @{ P = $cdm; N = 'SubscribedContent-353694Enabled'; V = 0; D = 'предложения в Параметрах' },
+        @{ P = $cdm; N = 'SubscribedContent-353696Enabled'; V = 0; D = 'предложения в Параметрах' },
+        @{ P = $cdm; N = 'SubscribedContent-353698Enabled'; V = 0; D = 'предложения на временной шкале' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement"; N = 'ScoobeSystemSettingEnabled'; V = 0; D = 'напоминания "завершите настройку устройства"' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"; N = 'Enabled'; V = 0; D = 'рекламный идентификатор' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\Privacy"; N = 'TailoredExperiencesWithDiagnosticDataEnabled'; V = 0; D = 'персональная реклама по диагностическим данным' },
+        @{ P = "$u\Software\Microsoft\InputPersonalization"; N = 'RestrictImplicitInkCollection'; V = 1; D = 'сбор рукописного ввода' },
+        @{ P = "$u\Software\Microsoft\InputPersonalization"; N = 'RestrictImplicitTextCollection'; V = 1; D = 'сбор набранного текста' },
+        @{ P = "$u\Software\Microsoft\InputPersonalization\TrainedDataStore"; N = 'HarvestContacts'; V = 0; D = 'сбор контактов для подсказок ввода' },
+        @{ P = "$u\Software\Microsoft\Personalization\Settings"; N = 'AcceptedPrivacyPolicy'; V = 0; D = 'согласие на персонализацию ввода' },
+        @{ P = "$u\Software\Microsoft\Siuf\Rules"; N = 'NumberOfSIUFInPeriod'; V = 0; D = 'просьбы оставить отзыв' },
+        @{ P = "$u\Software\Policies\Microsoft\Windows\Explorer"; N = 'DisableSearchBoxSuggestions'; V = 1; D = 'результаты из интернета в поиске Пуска' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\Search"; N = 'BingSearchEnabled'; V = 0; D = 'поиск Bing в меню Пуск' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; N = 'Start_IrisRecommendations'; V = 0; D = 'рекомендации в Пуске' },
+        @{ P = "$u\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; N = 'ShowSyncProviderNotifications'; V = 0; D = 'реклама OneDrive в Проводнике' },
+        @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; N = 'PublishUserActivities'; V = 0; D = 'журнал действий' },
+        @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; N = 'UploadUserActivities'; V = 0; D = 'отправка журнала действий в Microsoft' },
+        @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; N = 'DODownloadMode'; V = 0; D = 'раздача обновлений другим компьютерам' },
+        @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N = 'StartupBoostEnabled'; V = 0; D = 'Edge стартует вместе с Windows' },
+        @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N = 'BackgroundModeEnabled'; V = 0; D = 'Edge работает в фоне после закрытия' }
+    )
+}
+$script:FixPrivacy = {
+    param($f)
+    $n = 0; $fail = 0
+    foreach ($s in @($f.Data.Todo)) {
+        try { Set-RegValueSafe $s.P $s.N $s.V 'DWord'; $n++ } catch { $fail++; Out-ReportOnly "       не записалось: $($s.N) - $($_.Exception.Message)" }
+    }
+    if ($fail -and $n -eq 0) { throw "ни одна настройка не записалась ($fail)" }
+    $t = "выключено настроек: $n"; if ($fail) { $t += ", не записалось: $fail (защищены системой)" }
+    return "$t; подействует после перезахода в систему"
+}
+$script:FixPromoApps = {
+    param($f)
+    $n = 0; $fail = 0
+    foreach ($full in @($f.Data.Packages)) {
+        try {
+            if ($f.Data.OtherUser) { Remove-AppxPackage -Package $full -User $f.Data.Sid -ErrorAction Stop } else { Remove-AppxPackage -Package $full -ErrorAction Stop }
+            Add-Change 'appx removed' $full; $n++
+        } catch { $fail++; Out-ReportOnly "       не удалилось: $full - $(($_.Exception.Message -split "`n")[0])" }
+    }
+    try {
+        foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { Test-PromoName "$($_.DisplayName)" })) {
+            try { Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop | Out-Null; Add-Change 'appx deprovisioned' "$($p.PackageName)" } catch { }
+        }
+    } catch { }
+    if ($fail -and $n -eq 0) { throw "не удалось удалить ни одного приложения ($fail)" }
+    $t = "удалено приложений: $n"; if ($fail) { $t += ", не удалилось: $fail" }
+    return $t
+}
+$script:FixDisableTasks = {
+    param($f)
+    $n = 0
+    foreach ($t in @($f.Data.Tasks)) {
+        $tp = $t.Substring(0, $t.LastIndexOf('\') + 1); $tn = $t.Substring($t.LastIndexOf('\') + 1)
+        try { Disable-ScheduledTask -TaskPath $tp -TaskName $tn -ErrorAction Stop | Out-Null; Add-Change 'task disabled' $t; $n++ } catch { }
+    }
+    return "отключено задач: $n"
+}
+
+function Invoke-PrivacyChecks {
+    Start-Section 'Реклама и слежка Windows'
+
+    Invoke-Check 'настройки рекламы и сбора данных' {
+        $all = @(Get-PrivacySettings)
+        $todo = @()
+        foreach ($s in $all) { $cur = Get-RegValue $s.P $s.N; if ($null -eq $cur -or "$cur" -ne "$($s.V)") { $todo += $s } }
+        if ($todo.Count) {
+            Add-Finding -Level WARN -Title "Реклама, подсказки и сбор данных Windows: не выключено $($todo.Count) из $($all.Count)" -Detail @($todo | ForEach-Object { $_.D }) `
+                -Fix $script:FixPrivacy -FixText "выключить всё перечисленное для пользователя $($script:Ctx.MainName) (старые значения сохраняются; на работу программ не влияет)" -Data @{ Todo = $todo }
+        } else { Add-Finding -Level OK -Title "Реклама, подсказки и сбор данных Windows выключены ($($all.Count) настроек)" }
+    }
+
+    Invoke-Check 'задачи сбора телеметрии' {
+        $want = @('\Microsoft\Windows\Customer Experience Improvement Program\Consolidator', '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip', '\Microsoft\Windows\Feedback\Siuf\DmClient', '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload')
+        $on = @()
+        foreach ($t in $want) {
+            $tp = $t.Substring(0, $t.LastIndexOf('\') + 1); $tn = $t.Substring($t.LastIndexOf('\') + 1)
+            $st = Get-ScheduledTask -TaskPath $tp -TaskName $tn -ErrorAction SilentlyContinue
+            if ($st -and "$($st.State)" -ne 'Disabled') { $on += $t }
+        }
+        if ($on.Count) { Add-Finding -Level WARN -Title "Задачи программы улучшения качества и сбора отзывов включены: $($on.Count)" -Detail $on -Fix $script:FixDisableTasks -FixText 'отключить эти задачи' -Data @{ Tasks = $on } }
+        else { Add-Finding -Level OK -Title 'Задачи сбора отзывов и CEIP отключены' }
+    }
+
+    Invoke-Check 'рекламные приложения' {
+        $pk = @()
+        if ($script:Ctx.Differs) { $pk = @(Get-AppxPackage -User $script:Ctx.MainSid -ErrorAction Stop) } else { $pk = @(Get-AppxPackage -ErrorAction Stop) }
+        $promo = @($pk | Where-Object { Test-PromoName "$($_.Name)" })
+        if ($promo.Count) {
+            Add-Finding -Level WARN -Title "Рекламные и ненужные встроенные приложения: $($promo.Count)" -Detail @($promo | ForEach-Object { "$($_.Name)" } | Sort-Object -Unique) `
+                -Fix $script:FixPromoApps -FixText 'удалить эти приложения (любое можно вернуть из Microsoft Store)' -Data @{ Packages = @($promo | ForEach-Object { "$($_.PackageFullName)" }); OtherUser = $script:Ctx.Differs; Sid = $script:Ctx.MainSid }
+        } else { Add-Finding -Level OK -Title 'Рекламных встроенных приложений нет' }
+    }
+}
+
+# ================================================================ ДЕМО (ничего не проверяет и не меняет)
+function Invoke-DemoChecks {
+    $ok = { param($f) Start-Sleep -Milliseconds 200; return 'демо: сделано понарошку' }
+    $fail = { param($f) throw 'демо: так выглядит неудача' }
+    $script:Section = 'Система'
+    Add-Finding -Level OK -Title 'Версия Windows актуальная: Windows 11 Pro 25H2'
+    Add-Finding -Level WARN -Title 'Windows Update: не установлено обновлений: 2' -Detail @('Накопительное обновление KB0000000', 'Обновление .NET') -Manual 'Параметры > Центр обновления Windows'
+    $script:Section = 'Сертификаты'
+    Add-Finding -Level BAD -Title 'Корневой сертификат вне программ доверия Microsoft и Mozilla: Example Interception Root CA' -Detail @('кому выдан: CN=Example Interception Root CA, O=Example Org', 'хранилище: Доверенные корневые (Root); где лежит: компьютер') -Fix $ok -FixText 'удалить сертификат (копия .cer сохраняется)'
+    Add-Finding -Level WARN -Title 'Незнакомый корневой сертификат: Example Corp Root' -Fix $ok -FixText 'удалить сертификат' -Explicit -Manual 'выяснить, какая программа его поставила'
+    $script:Section = 'Защита'
+    Add-Finding -Level BAD -Title 'Исключение Defender (папка/файл): C:\Example\Crack' -Fix $fail -FixText 'убрать исключение'
+    Add-Finding -Level OK -Title 'Брандмауэр Windows включён во всех профилях'
+    Add-Finding -Level INFO -Title 'Полная проверка Defender была 3 дн. назад'
+    $script:Section = 'Реклама и слежка Windows'
+    Add-Finding -Level WARN -Title 'Реклама, подсказки и сбор данных Windows: не выключено 12 из 31' -Fix $ok -FixText 'выключить всё перечисленное'
+}
+
+# ================================================================ ЗАПУСК ПРОВЕРОК, ИТОГ, ИСПРАВЛЕНИЕ
+function Invoke-AllChecks {
+    $script:Findings = New-Object System.Collections.ArrayList
+    if ($script:DemoMode) { Invoke-DemoChecks; return }
+    $script:Ctx = Get-RunContext
+    $script:UserHives = @(Get-UserHives)
+    $script:Programs = @(Get-Programs)
+    Invoke-SystemChecks
+    Invoke-ProtectionChecks
+    Invoke-CertificateChecks
+    Invoke-BrowserChecks
+    Invoke-NetworkChecks
+    Invoke-AutorunChecks
+    Invoke-AccountChecks
+    Invoke-ProgramChecks
+    Invoke-PrivacyChecks
+}
+
+function Set-FindingNumbers {
+    $n = 0
+    foreach ($lvl in @('BAD', 'WARN')) {
+        foreach ($f in $script:Findings) { if ($f.Level -eq $lvl -and $f.Fix) { $n++; $f.Num = $n } }
+    }
+}
+
+function Show-Results {
+    param([string]$Header)
+    Out-Line ''
+    Out-Line ('=' * 78)
+    Out-Line "  $Header"
+    Out-Line ('=' * 78)
+    $sections = @(); foreach ($f in $script:Findings) { if ($sections -notcontains $f.Section) { $sections += $f.Section } }
+    foreach ($s in $sections) {
+        Out-Line ''
+        Out-Line "--- $s ---" 'Cyan'
+        foreach ($lvl in @('BAD', 'WARN', 'ERR', 'OK', 'INFO')) {
+            foreach ($f in $script:Findings) { if ($f.Section -eq $s -and $f.Level -eq $lvl) { Show-Finding $f } }
+        }
+    }
+}
+
+function Show-Summary {
+    param([string]$Header)
+    $bad = @($script:Findings | Where-Object { $_.Level -eq 'BAD' })
+    $warn = @($script:Findings | Where-Object { $_.Level -eq 'WARN' })
+    $err = @($script:Findings | Where-Object { $_.Level -eq 'ERR' })
+    $ok = @($script:Findings | Where-Object { $_.Level -eq 'OK' })
+    Out-Line ''
+    Out-Line ('=' * 78)
+    Out-Line "  $Header"
+    Out-Line ('=' * 78)
+    Out-Line "  зелёных (хорошо): $($ok.Count)" 'Green'
+    $c = 'Green'; if ($bad.Count) { $c = 'Red' }
+    Out-Line "  красных (плохо):  $($bad.Count)" $c
+    $c = 'Green'; if ($warn.Count) { $c = 'Yellow' }
+    Out-Line "  жёлтых (посмотри сам): $($warn.Count)" $c
+    if ($err.Count) { Out-Line "  проверок не выполнилось: $($err.Count)" 'Magenta' }
+    if ($bad.Count) { Out-Line ''; Out-Line '  КРАСНОЕ:' 'Red'; foreach ($f in $bad) { Show-Finding $f -Short } }
+    if ($warn.Count) { Out-Line ''; Out-Line '  ЖЁЛТОЕ:' 'Yellow'; foreach ($f in $warn) { Show-Finding $f -Short } }
+    if ($err.Count) { Out-Line ''; Out-Line '  НЕ ПРОВЕРЕНО (ошибка самой проверки):' 'Magenta'; foreach ($f in $err) { Show-Finding $f } }
+    if ($bad.Count + $warn.Count -eq 0) { Out-Line ''; Out-Line '  Всё чисто.' 'Green' }
+}
+
+function Resolve-Selection {
+    # 'YES' - красное; 'ALL' - красное и жёлтое; номера и диапазоны - явно. Пункты "только по номеру" берутся только по номеру.
+    param([string]$Text, $Findings)
+    $pick = @{}
+    $fixable = @($Findings | Where-Object { $_.Fix -and $_.Num -gt 0 })
+    foreach ($tok in @(("$Text".ToUpper() -replace '[,;]', ' ') -split '\s+' | Where-Object { $_ })) {
+        if ($tok -eq 'YES' -or $tok -eq 'ДА' -or $tok -eq 'Y') { foreach ($f in $fixable) { if ($f.Level -eq 'BAD' -and -not $f.Explicit) { $pick[$f.Num] = $f } } }
+        elseif ($tok -eq 'ALL' -or $tok -eq 'ВСЕ' -or $tok -eq 'ВСЁ') { foreach ($f in $fixable) { if (-not $f.Explicit) { $pick[$f.Num] = $f } } }
+        elseif ($tok -match '^#?(\d+)$') { $n = [int]$matches[1]; foreach ($f in $fixable) { if ($f.Num -eq $n) { $pick[$f.Num] = $f } } }
+        elseif ($tok -match '^#?(\d+)-#?(\d+)$') { $a = [int]$matches[1]; $b = [int]$matches[2]; foreach ($f in $fixable) { if ($f.Num -ge $a -and $f.Num -le $b) { $pick[$f.Num] = $f } } }
+    }
+    return @($pick.Keys | Sort-Object | ForEach-Object { $pick[$_] })
+}
+
+function New-RestorePoint {
+    if (-not $script:IsWin -or $script:DemoMode) { return }
+    $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+    $srOld = Get-RegValue $srKey 'SystemRestorePointCreationFrequency'
+    try {
+        # по умолчанию Windows разрешает одну точку в сутки; на один вызов снимаем это ограничение
+        New-ItemProperty -LiteralPath $srKey -Name SystemRestorePointCreationFrequency -Value 0 -PropertyType DWord -Force | Out-Null
+        Checkpoint-Computer -Description "PcCheck $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningVariable cpWarn -WarningAction SilentlyContinue
+        if ($cpWarn) { Out-Line "  точка восстановления: $($cpWarn -join ' ')" 'Yellow' } else { Out-Line '  точка восстановления создана' 'Green' }
+    } catch { Out-Line "  точка восстановления НЕ создана ($($_.Exception.Message)) - остаются копии в папке backup" 'Yellow' }
+    finally {
+        try {
+            if ($null -eq $srOld) { Remove-ItemProperty -LiteralPath $srKey -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -LiteralPath $srKey -Name SystemRestorePointCreationFrequency -Value $srOld }
+        } catch { }
+    }
+}
+
+function Invoke-Fixes {
+    param($Selected)
+    Out-Line ''
+    Out-Line ('=' * 78)
+    Out-Line "  ИСПРАВЛЕНИЕ: выбрано пунктов - $(@($Selected).Count)"
+    Out-Line ('=' * 78)
+    New-RestorePoint
+    $okN = 0; $failN = 0
+    foreach ($f in @($Selected)) {
+        Out-Line ''
+        Out-Line "  #$($f.Num) $($f.Title)" 'White'
+        Add-Change 'FIX START' "#$($f.Num) $($f.Title)"
+        $ErrorActionPreference = 'Stop'
+        try {
+            $res = & $f.Fix $f
+            $msg = 'готово'; $last = @($res | Where-Object { $_ -is [string] }) | Select-Object -Last 1
+            if ($last) { $msg = $last }
+            Out-Line "       ИСПРАВЛЕНО: $msg" 'Green'
+            if ($f.NeedsReboot) { $script:RebootNeeded = $true }
+            $okN++
+        } catch {
+            Out-Line "       НЕ УДАЛОСЬ: $($_.Exception.Message)" 'Red'
+            Add-Change 'FIX FAILED' "#$($f.Num) $($_.Exception.Message)"
+            $failN++
+        }
+        $ErrorActionPreference = 'Continue'
+    }
+    Out-Line ''
+    $c = 'Green'; if ($failN) { $c = 'Yellow' }
+    Out-Line "  Исправлено: $okN, не удалось: $failN" $c
+}
+
+function Initialize-RunFolder {
+    $name = "$env:COMPUTERNAME"; if (-not $name) { $name = 'PC' }
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
+    $candidates = @()
+    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot 'PcCheck_Reports') }
+    if ($script:IsWin) { $candidates += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PcCheck_Reports') }
+    $candidates += (Join-Path ([IO.Path]::GetTempPath()) 'PcCheck_Reports')
+    foreach ($base in $candidates) {
+        try {
+            $run = Join-Path $base "${name}_$stamp"
+            New-Item -ItemType Directory -Path $run -Force -ErrorAction Stop | Out-Null
+            $script:RunDir = $run
+            $script:ReportFile = Join-Path $run 'report.txt'
+            $script:BackupDir = Join-Path $run 'backup'
+            $script:JournalFile = Join-Path $base "${name}_changes.tsv"
+            $ig = Join-Path $base "${name}_ignore.txt"
+            if (Test-Path -LiteralPath $ig) { $script:IgnoreList = @(Get-Content -LiteralPath $ig -Encoding UTF8 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch '^#' }) }
+            return
+        } catch { }
+    }
+    throw 'Не удалось создать папку для отчёта'
+}
+
+function Invoke-Main {
+    Initialize-RunFolder
+    $who = ''
+    if ($script:IsWin) { $who = "$env:COMPUTERNAME, запущено от $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" }
+    Out-Line ('=' * 78)
+    Out-Line "  ПРОВЕРКА КОМПЬЮТЕРА  |  PcCheck $script:Version  |  $(Get-Date -Format 'dd.MM.yyyy HH:mm')"
+    Out-Line "  $who"
+    Out-Line ('=' * 78)
+    if ($script:DemoMode) { Out-Line '  ДЕМО-РЕЖИМ: ничего не проверяется и не меняется, данные выдуманы' 'Yellow' }
+    if ($script:IgnoreList.Count) { Out-Line "  подключён список «это нормально»: строк - $($script:IgnoreList.Count)" 'Gray' }
+    Write-Host ''
+    Write-Host '  Собираю данные (2-5 минут; дольше всего - поиск обновлений и проверка подписей)...' -ForegroundColor Cyan
+    Invoke-AllChecks
+    if (-not $script:DemoMode -and $script:Ctx.Differs) {
+        Out-Line ''
+        Out-Line "  ВНИМАНИЕ: права администратора выданы другой учётной записью ($($script:Ctx.CurrentName))." 'Yellow'
+        Out-Line "  Настройки пользователя проверяются и правятся для того, кто сидит за компьютером: $($script:Ctx.MainName)." 'Yellow'
+    }
+    Set-FindingNumbers
+    Show-Results 'ПОДРОБНО ПО РАЗДЕЛАМ'
+    Show-Summary 'ИТОГ'
+    Save-Report
+
+    $fixable = @($script:Findings | Where-Object { $_.Fix -and $_.Num -gt 0 })
+    if ($fixable.Count -and -not $ReportOnly) {
+        $red = @($fixable | Where-Object { $_.Level -eq 'BAD' -and -not $_.Explicit }).Count
+        $both = @($fixable | Where-Object { -not $_.Explicit }).Count
+        Out-Line ''
+        Out-Line '  ЧТО ИСПРАВИТЬ? Напиши одно из:' 'White'
+        Out-Line "     YES     - всё красное с автоисправлением (пунктов: $red)" 'White'
+        Out-Line "     ALL     - красное и жёлтое (пунктов: $both)" 'White'
+        Out-Line '     1 4 7   - только эти номера; можно диапазон 3-6; можно вместе: YES 12 15' 'White'
+        Out-Line '     Enter   - ничего не менять' 'White'
+        Out-Line '  Пункты с пометкой "только по номеру" выполняются только если назвать их номер.' 'Gray'
+        $answer = Read-Host '  Ввод'
+        Out-ReportOnly "  Ввод: $answer"
+        $sel = @(Resolve-Selection $answer $script:Findings)
+        if ($sel.Count) {
+            Invoke-Fixes $sel
+            Save-Report
+            Write-Host ''
+            Write-Host '  Перепроверяю...' -ForegroundColor Cyan
+            Invoke-AllChecks
+            Set-FindingNumbers
+            Show-Summary 'ПОСЛЕ ИСПРАВЛЕНИЯ (повторная проверка)'
+            if ($script:RebootNeeded) { Out-Line ''; Out-Line '  Нужна перезагрузка, чтобы изменения вступили в силу.' 'Yellow' }
+        } else {
+            Out-Line ''
+            Out-Line '  Ничего не изменено.' 'Gray'
+        }
+    } elseif ($ReportOnly) {
+        Out-Line ''
+        Out-Line '  Режим "только отчёт": ничего не изменено.' 'Gray'
+    }
+    Out-Line ''
+    Out-Line "  Отчёт:   $script:ReportFile" 'Cyan'
+    if (Test-Path -LiteralPath $script:BackupDir) { Out-Line "  Копии:   $script:BackupDir" 'Cyan' }
+    if (Test-Path -LiteralPath $script:JournalFile) { Out-Line "  Журнал:  $script:JournalFile" 'Cyan' }
+    Save-Report
+}
+
+if ($LoadOnly) { return }
+try { Invoke-Main }
+catch {
+    Write-Host ''
+    Write-Host "ОШИБКА СКРИПТА: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "$($_.ScriptStackTrace)" -ForegroundColor DarkGray
+    try { [void]$script:Report.AppendLine("ОШИБКА СКРИПТА: $($_.Exception.Message)`r`n$($_.ScriptStackTrace)"); Save-Report } catch { }
+}
+if (-not $NoPause) { Write-Host ''; [void](Read-Host 'Нажми Enter, чтобы закрыть окно') }
