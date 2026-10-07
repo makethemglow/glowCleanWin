@@ -90,6 +90,8 @@ RSet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'Shell' 'expl
 function MakeCert($subj) { $rsa = [System.Security.Cryptography.RSA]::Create(2048); $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($subj, $rsa, 'SHA256', [System.Security.Cryptography.RSASignaturePadding]::Pkcs1); return $req.CreateSelfSigned([DateTimeOffset]::Now, [DateTimeOffset]::Now.AddYears(5)) }
 function Blob($cert) { $ms = New-Object IO.MemoryStream; foreach ($pair in @(@(3, ([byte[]](1..20))), @(32, $cert.RawData), @(11, ([byte[]](1..6))))) { $d = [byte[]]$pair[1]; $ms.Write([BitConverter]::GetBytes([uint32]$pair[0]), 0, 4); $ms.Write([BitConverter]::GetBytes([uint32]1), 0, 4); $ms.Write([BitConverter]::GetBytes([uint32]$d.Length), 0, 4); $ms.Write($d, 0, $d.Length) }; return , $ms.ToArray() }
 function PutCert($base, $store, $subj) { $c = MakeCert $subj; RSet "$base\$store\Certificates\$($c.Thumbprint)" 'Blob' (Blob $c) 'Binary' }
+function PutCertObj($base, $store, $c) { RSet "$base\$store\Certificates\$($c.Thumbprint)" 'Blob' (Blob $c) 'Binary' }
+function NewReq($subj) { return [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($subj, [System.Security.Cryptography.RSA]::Create(2048), 'SHA256', [System.Security.Cryptography.RSASignaturePadding]::Pkcs1) }
 PutCert 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'Root' 'CN=Microsoft Root Certificate Authority 2011, O=Microsoft Corporation, C=US'
 if (-not $Clean) {
     PutCert 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'Root' 'CN=Example Interception Root CA, O=Example Org'
@@ -97,6 +99,13 @@ if (-not $Clean) {
     PutCert 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'Root' 'CN=Kaspersky Anti-Virus Personal Root Certificate, O=AO Kaspersky Lab'
     PutCert "$hku\Software\Microsoft\SystemCertificates" 'Root' 'CN=NVIDIA GameStream Server'
     PutCert 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'TrustedPublisher' 'CN=Example Interception Sub CA, O=Example Org'
+    # a publisher's own certificate issued by a CA (expired) and an expired self-signed root, both dropped into the Root store
+    $caReq = NewReq 'CN=Example Code Signing CA'
+    $caReq.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
+    $ca = $caReq.CreateSelfSigned([DateTimeOffset]::Now.AddYears(-4), [DateTimeOffset]::Now.AddYears(4))
+    PutCertObj 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'Root' ((NewReq 'CN=Example Devices Inc, O=Example Devices Inc, C=US').Create($ca, [DateTimeOffset]::Now.AddYears(-3), [DateTimeOffset]::Now.AddYears(-1), [byte[]](1..8)))
+    PutCertObj 'HKLM:\SOFTWARE\Microsoft\SystemCertificates' 'Root' ((NewReq 'CN=TEST-PC').CreateSelfSigned([DateTimeOffset]::Now.AddYears(-2), [DateTimeOffset]::Now.AddYears(900)))
+    RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Example Mouse Tool' 'DisplayName' 'Example Mouse Tool'; RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Example Mouse Tool' 'Publisher' 'Example Devices Inc.'
     RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' 'Dead' 'C:\Gone\gone.exe /x'
     RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' 'Steam' '"C:\Program Files\Steam\steam.exe" -silent'
     RSet "$hku\Software\Microsoft\Windows\CurrentVersion\Run" 'Upd' 'powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMA'

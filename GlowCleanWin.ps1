@@ -1156,12 +1156,27 @@ function Get-StoreCerts {
 function Get-CertLines {
     param($e)
     $c = $e.Cert
+    # дата начала помогает вспомнить, какую программу ставили в тот день
+    $life = "действует с $($c.NotBefore.ToString('dd.MM.yyyy')) по $($c.NotAfter.ToString('dd.MM.yyyy'))"
+    if ($c.NotAfter -lt (Get-Date)) { $life += ' - СРОК ИСТЁК' }
     return @(
         "кому выдан: $($c.Subject)",
         "кем выдан:  $($c.Issuer)",
         "хранилище: $($script:StoreNames[$e.Store]) ($($e.Store)); где лежит: $(($e.Where | Sort-Object -Unique) -join '; ')",
-        "действует до $($c.NotAfter.ToString('dd.MM.yyyy')); отпечаток $($c.Thumbprint)"
+        "$life; отпечаток $($c.Thumbprint)"
     )
+}
+function Get-CertProgramHint {
+    # установленные программы, издатель которых назван в сертификате. Это подсказка, а не проверка: имя в сертификат вписывает тот, кто его создал
+    param($Cert)
+    $subj = "$($Cert.Subject)"; $hit = @()
+    foreach ($a in $script:Programs) {
+        $pub = "$($a.Publisher)"
+        foreach ($i in 1..2) { $pub = ($pub -replace '(?i)[\s,.]+(Inc|LLC|Ltd|Corp|Corporation|GmbH|Co)\.?$', '').Trim() }
+        if ($pub.Length -lt 5) { continue }
+        if ($subj.IndexOf($pub, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit += "$($a.Name)" }
+    }
+    return @($hit | Sort-Object -Unique | Select-Object -First 4)
 }
 
 $script:FixRemoveCert = {
@@ -1249,10 +1264,21 @@ function Invoke-CertificateChecks {
             Add-Finding -Level WARN -Title "Много незнакомых корневых сертификатов: $($unkList.Count)" -Detail @($unkList | ForEach-Object { "$($_.Name) | $($_.E.Cert.Subject) | $(($_.E.Where | Sort-Object -Unique) -join '; ')" }) -Manual 'показать отчёт: либо на компьютере стоит корпоративное/специальное ПО, либо скрипт не узнал обычные сертификаты'
         } else {
             foreach ($u in $unkList) {
-                Add-Finding -Level WARN -Title "Незнакомый корневой сертификат: $($u.Name)" -Detail (Get-CertLines $u.E) -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $u.Data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
+                $c = $u.E.Cert
+                $title = "Незнакомый корневой сертификат: $($u.Name)"
+                $det = @(Get-CertLines $u.E)
+                if ($c.Subject -ne $c.Issuer) {
+                    # настоящий корневой сертификат подписан сам собой; этот выдан кем-то другим
+                    $title = "Незнакомый сертификат в хранилище корневых: $($u.Name)"
+                    $det += 'это не корневой сертификат: его выдал другой центр. Обычно так программа или драйвер делает подпись своего издателя доверенной'
+                }
+                if ($c.NotAfter -lt (Get-Date)) { $det += 'срок действия истёк - новое им уже не подписать; чаще всего это забытый остаток, который можно удалить' }
+                $hint = @(Get-CertProgramHint $c)
+                if ($hint.Count) { $det += "такой издатель есть у установленных программ: $($hint -join ', ') (имя в сертификат вписывает его создатель - это подсказка, а не проверка)" }
+                Add-Finding -Level WARN -Title $title -Detail $det -Fix $script:FixRemoveCert -FixText 'удалить сертификат (копия .cer сохраняется)' -Data $u.Data -Explicit -Manual 'выяснить, какая программа его поставила; если непонятно - показать отчёт'
             }
         }
-        if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов вне программ доверия Microsoft и Mozilla в доверенных хранилищах нет (компьютер и вошедшие в систему пользователи; просмотрено сертификатов: $script:CertScanned)" }
+        if ($out -eq 0) { Add-Finding -Level OK -Title "Сертификатов из встроенного списка «вне программ доверия Microsoft и Mozilla» нет (компьютер и вошедшие в систему пользователи; просмотрено сертификатов: $script:CertScanned)" }
         if ($mitm -eq 0 -and $unk -eq 0) { Add-Finding -Level OK -Title 'Посторонних корневых сертификатов нет' }
     }
 

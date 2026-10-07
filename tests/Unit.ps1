@@ -146,5 +146,18 @@ T 'owner unknown folder' (Get-OwnerProgram 'C:\Program Files\Nobody\svc.exe') ''
 T 'owner too broad location ignored' (Get-OwnerProgram 'C:\Program Files\Zzz\svc.exe') ''
 T 'owner never for user-writable' (Get-OwnerProgram 'C:\ProgramData\Example Sync\daemon.exe') ''
 T 'owner common files' (Get-OwnerProgram 'C:\Program Files\Common Files\x\y.exe') ''
+# certificate details
+$script:Programs = @(
+    [pscustomobject]@{ Name = 'Example Mouse Tool'; Version = '1'; Publisher = 'Example Devices Inc.'; Location = ''; Hidden = $false },
+    [pscustomobject]@{ Name = 'Tiny'; Version = '1'; Publisher = 'Org'; Location = ''; Hidden = $false },
+    [pscustomobject]@{ Name = 'Other'; Version = '1'; Publisher = 'Samsung Electronics Co., Ltd.'; Location = ''; Hidden = $false }
+)
+T 'cert hint by publisher' ((Get-CertProgramHint ([pscustomobject]@{ Subject = 'CN=Example Devices Inc, O=Example Devices Inc, C=US' })) -join ',') 'Example Mouse Tool'
+T 'cert hint strips two suffixes' ((Get-CertProgramHint ([pscustomobject]@{ Subject = 'CN=samsung electronics local' })) -join ',') 'Other'
+T 'cert hint ignores short publishers' (@(Get-CertProgramHint ([pscustomobject]@{ Subject = 'CN=Example Org Root, O=Org' })).Count) 0
+$old = $req.CreateSelfSigned([DateTimeOffset]::Now.AddYears(-3), [DateTimeOffset]::Now.AddYears(-1))
+$lines = @(Get-CertLines ([pscustomobject]@{ Cert = $old; Store = 'Root'; Where = @('компьютер') }))
+T 'cert lines expired' ($lines[3] -match '^действует с \d\d\.\d\d\.\d{4} по \d\d\.\d\d\.\d{4} - СРОК ИСТЁК; отпечаток [0-9A-F]{40}$') 'True'
+T 'cert lines valid' ((Get-CertLines ([pscustomobject]@{ Cert = $cert; Store = 'Root'; Where = @('компьютер') }))[3] -match 'ИСТЁК') 'False'
 "FAILED: $fail"
 if ($fail) { exit 1 }
