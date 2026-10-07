@@ -125,5 +125,26 @@ $script:ProcList = @([pscustomobject]@{ Name = 'tool'; Id = 1; Path = 'C:\A\bin\
 T 'running under folder' ((Get-RunningUnder 'C:\A\') -join ',') 'tool'
 T 'running under file' ((Get-RunningUnder 'C:\AB\other.exe') -join ',') 'other'
 T 'running under wildcard' (@(Get-RunningUnder 'C:\*').Count) 0
+# signatures and owning program
+T 'signer no format' (Get-SignerText 'NO FORMAT') 'у файлов этого типа подписи не бывает'
+T 'signer expired' (Get-SignerText 'UnknownError | Vendor Inc | expired') 'подпись не подтверждена: Vendor Inc - сертификат истёк, а метки времени в подписи нет'
+T 'signer reason' (Get-SignerText 'NotTrusted | Vendor Inc | chain not trusted') 'подпись не подтверждена: Vendor Inc - chain not trusted'
+T 'signer no reason' (Get-SignerText 'UnknownError | Vendor Inc') 'подпись не подтверждена: Vendor Inc'
+T 'signer tampered' (Get-SignerText 'HashMismatch | Vendor Inc') 'ФАЙЛ ИЗМЕНЁН ПОСЛЕ ПОДПИСИ (подписывал: Vendor Inc)'
+T 'signer unknown' (Get-SignerText 'UnknownError') 'подпись не в порядке (UnknownError)'
+T 'not valid when unconfirmed' (Test-ValidSigned 'UnknownError | Vendor Inc | expired') 'False'
+$script:Programs = @(
+    [pscustomobject]@{ Name = 'Example Sync'; Version = '2.1'; Publisher = 'Example Devs'; Location = ''; Hidden = $false },
+    [pscustomobject]@{ Name = 'CAD Suite'; Version = '23'; Publisher = 'Maker'; Location = 'D:\Apps\CAD\'; Hidden = $false },
+    [pscustomobject]@{ Name = 'Root Thing'; Version = '1'; Publisher = 'X'; Location = 'C:\Program Files'; Hidden = $false }
+)
+T 'owner by folder name' (Get-OwnerProgram 'C:\Program Files\Example Sync\daemon.exe') 'программа Example Sync 2.1'
+T 'owner by install location' (Get-OwnerProgram 'D:\Apps\CAD\Libs\Server\srv.exe') 'программа CAD Suite 23'
+T 'owner by publisher folder' (Get-OwnerProgram 'C:\Program Files (x86)\Maker\tool\t.exe') 'программа CAD Suite 23'
+T 'owner store app' (Get-OwnerProgram 'C:\Program Files\WindowsApps\VENDOR.App_1.2.3.0_x64__abc\Svc\s.exe') 'приложение из Microsoft Store VENDOR.App'
+T 'owner unknown folder' (Get-OwnerProgram 'C:\Program Files\Nobody\svc.exe') ''
+T 'owner too broad location ignored' (Get-OwnerProgram 'C:\Program Files\Zzz\svc.exe') ''
+T 'owner never for user-writable' (Get-OwnerProgram 'C:\ProgramData\Example Sync\daemon.exe') ''
+T 'owner common files' (Get-OwnerProgram 'C:\Program Files\Common Files\x\y.exe') ''
 "FAILED: $fail"
 if ($fail) { exit 1 }

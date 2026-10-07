@@ -325,11 +325,27 @@ function Get-Signer {
     if ($script:SigCache.ContainsKey($Path)) { return $script:SigCache[$Path] }
     $r = 'FILE NOT FOUND'
     if (Test-PathSafe $Path -PathType Leaf) {
-        try {
-            $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
-            $r = "$($s.Status)"
-            if ($s.SignerCertificate) { $r += ' | ' + $s.SignerCertificate.GetNameInfo('SimpleName', $false) }
-        } catch { $r = 'signature check failed' }
+        if ($Path -match '(?i)\.(bat|cmd)$') { $r = 'NO FORMAT' }   # пакетный файл подписать нельзя: спрашивать о подписи незачем
+        else {
+            try {
+                $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+                $r = "$($s.Status)"
+                if ($r -eq 'NotSupportedFileFormat') { $r = 'NO FORMAT' }
+                elseif ($s.SignerCertificate) {
+                    $r += ' | ' + $s.SignerCertificate.GetNameInfo('SimpleName', $false)
+                    if ($r -notmatch '^(Valid|HashMismatch) \|') {
+                        # третья часть - почему подпись не подтвердилась (у изменённого файла причина уже названа)
+                        $na = $s.SignerCertificate.NotAfter
+                        if ($na -is [datetime] -and $na -lt (Get-Date) -and -not $s.TimeStamperCertificate) { $r += ' | expired' }
+                        elseif ($s.StatusMessage) {
+                            $why = ("$($s.StatusMessage)" -replace '\s+', ' ').Trim()
+                            if ($why.Length -gt 110) { $why = $why.Substring(0, 110) + '...' }
+                            $r += ' | ' + $why
+                        }
+                    }
+                }
+            } catch { $r = 'signature check failed' }
+        }
     }
     $script:SigCache[$Path] = $r
     return $r
@@ -339,8 +355,16 @@ function Test-ValidSigned { param([string]$Signer) return ($Signer -match '^Vali
 function Get-SignerText {
     param([string]$Signer)
     if ($Signer -eq 'FILE NOT FOUND') { return 'файла нет' }
+    if ($Signer -eq 'NO FORMAT') { return 'у файлов этого типа подписи не бывает' }
     if ($Signer -match '^Valid \| (.+)$') { return "подпись: $($matches[1])" }
     if ($Signer -match '^NotSigned') { return 'БЕЗ ПОДПИСИ' }
+    $parts = @($Signer -split ' \| ', 3)
+    if ($parts.Count -ge 2) {
+        if ($parts[0] -eq 'HashMismatch') { return "ФАЙЛ ИЗМЕНЁН ПОСЛЕ ПОДПИСИ (подписывал: $($parts[1]))" }
+        $why = ''
+        if ($parts.Count -ge 3) { $why = " - $($parts[2])"; if ($parts[2] -eq 'expired') { $why = ' - сертификат истёк, а метки времени в подписи нет' } }
+        return "подпись не подтверждена: $($parts[1])$why"
+    }
     return "подпись не в порядке ($Signer)"
 }
 function Set-EnvText {
@@ -499,15 +523,44 @@ function Get-Programs {
             try { $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction Stop } catch { continue }
             if (-not $p.DisplayName) { continue }
             $key = "$($p.DisplayName)|$($p.DisplayVersion)"
-            if ($seen.ContainsKey($key)) { continue }
-            $seen[$key] = 1
-            $list += [pscustomobject]@{ Name = "$($p.DisplayName)"; Version = "$($p.DisplayVersion)"; Publisher = "$($p.Publisher)"; Location = "$($p.InstallLocation)"; Hidden = ($p.SystemComponent -eq 1) }
+            $hidden = ($p.SystemComponent -eq 1)
+            if ($seen.ContainsKey($key)) {
+                # одна программа бывает записана дважды - установщик и его скрытый внутренний пакет: видимая запись главнее
+                if (-not $hidden) { $seen[$key].Hidden = $false }
+                if (-not $seen[$key].Location -and $p.InstallLocation) { $seen[$key].Location = "$($p.InstallLocation)" }
+                continue
+            }
+            $o = [pscustomobject]@{ Name = "$($p.DisplayName)"; Version = "$($p.DisplayVersion)"; Publisher = "$($p.Publisher)"; Location = "$($p.InstallLocation)"; Hidden = $hidden }
+            $seen[$key] = $o
+            $list += $o
         }
     }
     return $list
 }
 function Test-Installed { param([string]$Rx) return (@($script:Programs | Where-Object { $_.Name -match $Rx -or $_.Publisher -match $Rx }).Count -gt 0) }
 function Get-InstalledNames { param([string]$Rx) return @($script:Programs | Where-Object { -not $_.Hidden -and $_.Name -match $Rx } | ForEach-Object { "$($_.Name) $($_.Version)".Trim() } | Sort-Object -Unique) }
+function Get-OwnerProgram {
+    # какой установленной программе принадлежит файл: по папке установки, иначе по имени папки в Program Files.
+    # Смотрим только туда, куда без прав администратора не записать. Это подсказка для отчёта, а не проверка; '' - не нашлось
+    param([string]$Path)
+    $p = "$Path"
+    if (-not (Test-FullPath $p) -or (Test-UserWritablePath $p)) { return '' }
+    if ($p -match '(?i)^[A-Z]:\\Program Files\\WindowsApps\\([^\\_]+)_') { return "приложение из Microsoft Store $($matches[1])" }
+    foreach ($a in $script:Programs) {
+        $loc = "$($a.Location)".Trim('"').TrimEnd('\')
+        if ($loc.Length -lt 8 -or $loc -match '(?i)^[A-Z]:\\(Program Files( \(x86\))?|Windows|ProgramData|Users)$') { continue }
+        if ($p.StartsWith("$loc\", [StringComparison]::OrdinalIgnoreCase)) { return "программа $("$($a.Name) $($a.Version)".Trim())" }
+    }
+    if ($p -match '(?i)^[A-Z]:\\Program Files( \(x86\))?\\([^\\]+)\\') {
+        $dir = $matches[2]
+        if ($dir.Length -ge 3 -and $dir -ine 'Common Files') {
+            foreach ($a in $script:Programs) {
+                if ("$($a.Name)".StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) -or "$($a.Publisher)" -ieq $dir) { return "программа $("$($a.Name) $($a.Version)".Trim())" }
+            }
+        }
+    }
+    return ''
+}
 function Get-ProcList {
     # запущенные программы с путём к своему файлу; список собирается один раз за проверку
     if ($null -eq $script:ProcList) {
@@ -1653,9 +1706,14 @@ function Invoke-AutorunChecks {
             if (Test-DeadTarget "$($s.PathName)" "$exe" $sg) {
                 if ("$($s.StartMode)" -ne 'Disabled') { $flag++; Add-Finding -Level WARN -Title "Служба без файла (остаток удалённой программы): $($s.Name)" -Detail $det -Fix $script:FixDeleteService -FixText 'удалить запись службы (файла всё равно нет)' -Data @{ Name = "$($s.Name)" } -Explicit }
             } elseif (-not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and $sg -ne 'no path') {
+                # многие честные программы свои службы не подписывают (или подписали давно): если файл лежит в защищённой папке
+                # установленной программы - это справка. Изменённый файл и отозванная подпись сюда не попадают
+                $owner = ''; if ($sg -match '^NotSigned' -or $sg -match '^(UnknownError|NotTrusted) \| .+ \| expired$') { $owner = Get-OwnerProgram "$exe" }
+                if ($owner) { $fine += "$($s.Name) -> $exe ($(Get-SignerText $sg); $owner)"; continue }
                 $flag++
                 $lvl = 'WARN'; if (Test-UserWritablePath "$exe") { $lvl = 'BAD' }
-                Add-Finding -Level $lvl -Title "Служба с неподписанным файлом: $($s.Name) ($($s.DisplayName))" -Detail $det -Manual 'выяснить, что это за программа; если незнакома - показать отчёт'
+                $what = 'с неподписанным файлом'; if ($sg -notmatch '^NotSigned') { $what = 'с файлом, подпись которого не подтверждена' }
+                Add-Finding -Level $lvl -Title "Служба ${what}: $($s.Name) ($($s.DisplayName))" -Detail $det -Manual 'выяснить, что это за программа; если незнакома - показать отчёт'
             } else { $fine += "$($s.Name) -> $exe ($(Get-SignerText $sg))" }
         }
         if ($fine.Count) { Add-Finding -Level INFO -Title "Службы сторонних программ: без замечаний - $($fine.Count)" -Detail $fine }

@@ -112,6 +112,10 @@ if (-not $Clean) {
     RSet 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' 'fDenyTSConnections' 0 'DWord'
     foreach ($a in @('Yandex Browser', 'AnyDesk', 'DriverPack Solution', 'Autodesk Fusion', 'CryptoPro CSP')) { RSet "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$a" 'DisplayName' $a; RSet "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$a" 'DisplayVersion' '1.0' }
     RSet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform' 'KeyManagementServiceName' 'kms.example.org'
+    # one program registered twice: the hidden inner package is met first, the visible installer entry second
+    RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{11111111-0000-0000-0000-000000000001}' 'DisplayName' 'Example Sync'; RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{11111111-0000-0000-0000-000000000001}' 'DisplayVersion' '2.1'
+    RSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{11111111-0000-0000-0000-000000000001}' 'SystemComponent' 1 'DWord'
+    RSet 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{22222222-0000-0000-0000-000000000002}' 'DisplayName' 'Example Sync'; RSet 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{22222222-0000-0000-0000-000000000002}' 'DisplayVersion' '2.1'
     RSet 'HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist' '1' 'abcdef;https://x'
 }
 $global:FakeFiles['C:\Program Files\Steam\steam.exe'] = 'Valid|Valve Corp.'
@@ -119,6 +123,8 @@ $global:FakeFiles['C:\Users\Tester\AppData\Roaming\evil\e.exe'] = 'NotSigned'
 $global:FakeFiles['C:\Windows\System32\svchost.exe'] = 'Valid|Microsoft Windows Publisher'
 $global:FakeFiles['C:\Program Files\Vendor\svc.exe'] = 'Valid|Vendor Inc'
 $global:FakeFiles['C:\ProgramData\x\unsigned.exe'] = 'NotSigned'
+$global:FakeFiles['C:\Program Files\Example Sync\sync-daemon.exe'] = 'NotSigned'
+$global:FakeFiles['C:\Program Files\Nobody\svc.exe'] = 'UnknownError|Some Signer'
 $global:FakeFiles['C:\Crack'] = 'DIR'
 $global:FakeFiles['C:\Crack\bin\patch.exe'] = 'NotSigned'
 $global:FakeFiles['C:\Users\Tester\.gradle'] = 'DIR'
@@ -149,6 +155,8 @@ function Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$Cla
                 [pscustomobject]@{ Name = 'GoneSvc'; DisplayName = 'Gone'; PathName = 'C:\Gone\svc.exe'; StartMode = 'Auto'; State = 'Stopped' }
                 [pscustomobject]@{ Name = 'BadSvc'; DisplayName = 'Bad'; PathName = 'C:\ProgramData\x\unsigned.exe'; StartMode = 'Auto'; State = 'Running' }
                 [pscustomobject]@{ Name = 'AnyDesk'; DisplayName = 'AnyDesk Service'; PathName = '"C:\Program Files\Vendor\svc.exe"'; StartMode = 'Auto'; State = 'Running' }
+                [pscustomobject]@{ Name = 'ExampleSync'; DisplayName = 'Example Sync daemon'; PathName = '"C:\Program Files\Example Sync\sync-daemon.exe" --service'; StartMode = 'Auto'; State = 'Running' }
+                [pscustomobject]@{ Name = 'NobodySvc'; DisplayName = 'Nobody'; PathName = 'C:\Program Files\Nobody\svc.exe'; StartMode = 'Manual'; State = 'Stopped' }
             }
         }
         'Win32_SystemDriver' { [pscustomobject]@{ Name = 'drv1'; PathName = '\SystemRoot\System32\svchost.exe'; StartMode = 'Boot'; State = 'Running' }; if (-not $Clean) { [pscustomobject]@{ Name = 'Asusgio2'; PathName = '\??\C:\Gone\AsIO2.sys'; StartMode = 'Auto'; State = 'Stopped' } } }
