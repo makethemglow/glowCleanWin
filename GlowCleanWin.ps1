@@ -1300,7 +1300,7 @@ $script:FixFirefoxRoots = {
     $lines += 'user_pref("security.enterprise_roots.enabled", false);'
     [IO.File]::WriteAllLines($uj, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
     Add-Change 'firefox pref' "$uj`tsecurity.enterprise_roots.enabled=false"
-    return 'записано в user.js профиля; подействует после перезапуска Firefox'
+    return 'записано в user.js профиля; подействует после перезапуска программы'
 }
 $script:FixMoveFile = {
     param($f)
@@ -1317,20 +1317,34 @@ $script:FixMoveFile = {
     return "убрано файлов: $n (копии в backup\files)"
 }
 
+# программы на движке Firefox: у каждой свои профили, своя настройка доверия и своя база сертификатов.
+# Dir - папка профилей внутри AppData\Roaming, Proc - имя процесса, Logins - смотреть ли файл сохранённых паролей
+$script:GeckoApps = @(
+    @{ Name = 'Firefox'; Dir = 'Mozilla\Firefox\Profiles'; Proc = 'firefox'; Logins = $true },
+    @{ Name = 'Zen Browser'; Dir = 'zen\Profiles'; Proc = 'zen'; Logins = $true },
+    @{ Name = 'LibreWolf'; Dir = 'librewolf\Profiles'; Proc = 'librewolf'; Logins = $true },
+    @{ Name = 'Waterfox'; Dir = 'Waterfox\Profiles'; Proc = 'waterfox'; Logins = $true },
+    @{ Name = 'Floorp'; Dir = 'Floorp\Profiles'; Proc = 'floorp'; Logins = $true },
+    @{ Name = 'Thunderbird'; Dir = 'Thunderbird\Profiles'; Proc = 'thunderbird'; Logins = $false }
+)
+
 function Invoke-BrowserChecks {
     Start-Section 'Браузеры'
     $profiles = @(Get-AllProfiles)
     $latin1 = [Text.Encoding]::GetEncoding(28591)
 
-    Invoke-Check 'Firefox: профили' {
+    Invoke-Check 'Firefox и программы на его движке: профили' {
         $found = 0
-        foreach ($up in $profiles) {
-            $root = Join-P $up.Profile 'AppData\Roaming\Mozilla\Firefox\Profiles'
+        $places = @()
+        foreach ($up in $profiles) { foreach ($app in $script:GeckoApps) { $places += @{ Up = $up; App = $app } } }
+        foreach ($pl in $places) {
+            $up = $pl.Up; $app = $pl.App
+            $root = Join-P $up.Profile ('AppData\Roaming\' + $app.Dir)
             foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
                 $prefs = Join-P $d.FullName 'prefs.js'
                 if (-not (Test-PathSafe $prefs)) { continue }
                 $found++
-                $tag = "Firefox, профиль $($d.Name) ($($up.Name))"
+                $tag = "$($app.Name), профиль $($d.Name) ($($up.Name))"
                 $state = $null
                 foreach ($pf in @('prefs.js', 'user.js')) {
                     $fp = Join-P $d.FullName $pf
@@ -1343,7 +1357,14 @@ function Invoke-BrowserChecks {
                     Add-Finding -Level OK -Title "$tag - не доверяет сертификатам, добавленным в Windows"
                 } else {
                     $why = 'настройка по умолчанию'; if ($state -eq 'true') { $why = 'включено явно' }
-                    Add-Finding -Level WARN -Title "$tag - доверяет всем сертификатам, добавленным в Windows ($why)" -Detail @('Настройки > Приватность и защита > Сертификаты > "Разрешить Firefox автоматически доверять сторонним корневым сертификатам"') `
+                    $title = "$tag - доверяет всем сертификатам, добавленным в Windows ($why)"
+                    $where = 'Настройки > Приватность и защита > Сертификаты > "Разрешить Firefox автоматически доверять сторонним корневым сертификатам"'
+                    if ($app.Name -ne 'Firefox') {
+                        # за чужие сборки не ручаемся: говорим только то, что видно в профиле
+                        $where = 'настройка security.enterprise_roots.enabled: в Firefox она включена по умолчанию, программы на его движке обычно ведут себя так же'
+                        if ($state -ne 'true') { $title = "$tag - доверие сертификатам, добавленным в Windows, не выключено" }
+                    }
+                    Add-Finding -Level WARN -Title $title -Detail @($where) `
                         -Fix $script:FixFirefoxRoots -FixText 'выключить это доверие (строка в user.js профиля)' -Data @{ Profile = $d.FullName }
                 }
                 $db = Join-P $d.FullName 'cert9.db'
@@ -1357,14 +1378,14 @@ function Invoke-BrowserChecks {
                     } catch { }
                     $hit = @(Get-DerCommonNames $txt | Where-Object { $script:OutsideProgramCa -contains (Get-NameHash $_) })
                     if ($hit.Count) {
-                        Add-Finding -Level BAD -Title "$tag - в собственной базе сертификатов Firefox есть корневой сертификат вне программ доверия" -Detail @('его импортировали прямо в Firefox (или это след уже удалённого)', $db) `
-                            -Fix $script:FixMoveFile -FixText 'убрать файл cert9.db в backup (Firefox создаст чистый; пропадут только вручную добавленные сертификаты и исключения). Firefox должен быть закрыт' -Data @{ Paths = @($db); NeedClosed = 'firefox' }
+                        Add-Finding -Level BAD -Title "$tag - в собственной базе сертификатов программы есть корневой сертификат вне программ доверия" -Detail @('его импортировали прямо в программу (или это след уже удалённого)', $db) `
+                            -Fix $script:FixMoveFile -FixText "убрать файл cert9.db в backup (программа создаст чистый; пропадут только вручную добавленные сертификаты и исключения). $($app.Name) нужно закрыть" -Data @{ Paths = @($db); NeedClosed = $app.Proc }
                     } else {
                         Add-Finding -Level OK -Title "$tag - в собственной базе сертификатов вне программ доверия нет"
                     }
                 }
                 $lj = Join-P $d.FullName 'logins.json'
-                if (Test-PathSafe $lj) {
+                if ($app.Logins -and (Test-PathSafe $lj)) {
                     $cnt = 0
                     try { $cnt = @((Get-Content -LiteralPath $lj -Raw -Encoding UTF8 | ConvertFrom-Json).logins | Where-Object { $_.encryptedPassword }).Count } catch { }
                     if ($cnt -gt 0) {
@@ -1375,7 +1396,7 @@ function Invoke-BrowserChecks {
                 }
             }
         }
-        if ($found -eq 0) { Add-Finding -Level INFO -Title 'Firefox: профилей не найдено' }
+        if ($found -eq 0) { Add-Finding -Level INFO -Title 'Firefox и программы на его движке: профилей не найдено' }
     }
 
     Invoke-Check 'Firefox: чужие файлы настроек в папке программы' {
@@ -1407,13 +1428,13 @@ function Invoke-BrowserChecks {
         }
     }
 
-    Invoke-Check 'браузеры с собственным списком доверенных сертификатов' {
+    Invoke-Check 'браузеры со встроенными дополнительными корневыми сертификатами' {
         $ya = @(Get-InstalledNames '(?i)Yandex\s?Browser|Яндекс\.?\s?Браузер|^Yandex$|Chromium-Gost|Chromium GOST|Atom\s?Browser|Браузер Atom')
         foreach ($up in $profiles) { if (Test-PathSafe (Join-P $up.Profile 'AppData\Local\Yandex\YandexBrowser\Application\browser.exe')) { $ya += "Яндекс Браузер (профиль $($up.Name))" } }
         $ya = @($ya | Sort-Object -Unique)
         if ($ya.Count) {
-            Add-Finding -Level INFO -Title 'Установлен браузер с собственным списком доверенных сертификатов' -Detail ($ya + @('он доверяет дополнительным корневым сертификатам независимо от хранилища Windows - проверка хранилища на него не распространяется'))
-        } else { Add-Finding -Level OK -Title 'Браузеров с собственным списком доверенных сертификатов нет' }
+            Add-Finding -Level INFO -Title 'Установлен браузер со встроенными дополнительными корневыми сертификатами' -Detail ($ya + @('он доверяет дополнительным корневым сертификатам независимо от хранилища Windows - проверка хранилища на него не распространяется'))
+        } else { Add-Finding -Level OK -Title 'Браузеров со встроенными дополнительными корневыми сертификатами не найдено' }
     }
 
     Invoke-Check 'политики, управляющие Chrome и Edge' {
