@@ -234,7 +234,13 @@ else {
     $st = Join-Path $prof 'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup'
     New-Item -ItemType Directory -Path $st -Force | Out-Null
     Set-Content (Join-Path $st 'run.vbs') 'x'
+    # shortcuts cannot be read without Windows: the two readers are replaced below
+    foreach ($n in 'Game.lnk', 'backup.lnk', 'loader.lnk') { Set-Content (Join-Path $st $n) 'x' }
 }
+function Get-LnkTarget { param([string]$Path) switch -Wildcard ($Path) { '*Game.lnk' { return 'C:\Program Files\Steam\steam.exe' } '*backup.lnk' { return 'D:\Scripts\backup.bat' } '*loader.lnk' { return 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } }; return '' }
+function Get-LnkArguments { param([string]$Path) if ($Path -like '*loader.lnk') { return '-nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMA' }; return '' }
+$global:FakeFiles['D:\Scripts\backup.bat'] = 'UnknownError'
+$global:FakeFiles['C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'] = 'Valid|Microsoft Windows'
 $global:Ans = [System.Collections.Queue]::new(); foreach ($a in $Answers) { $global:Ans.Enqueue($a) }
 function Read-Host { param($Prompt) $a = ''; if ($global:Ans.Count) { $a = $global:Ans.Dequeue() }; Write-Host "$Prompt`: $a  <- (ответ теста)" -ForegroundColor Magenta; return $a }
 $PSScriptRoot_fake = $work

@@ -464,6 +464,10 @@ function Get-LnkTarget {
     param([string]$Path)
     try { $sh = New-Object -ComObject WScript.Shell; return "$($sh.CreateShortcut($Path).TargetPath)" } catch { return '' }
 }
+function Get-LnkArguments {
+    param([string]$Path)
+    try { $sh = New-Object -ComObject WScript.Shell; return "$($sh.CreateShortcut($Path).Arguments)" } catch { return '' }
+}
 function Get-DirSizeMb {
     param([string]$Path)
     $sum = 0
@@ -1700,12 +1704,21 @@ function Invoke-AutorunChecks {
                 if ($f.Extension -eq '.lnk') {
                     $tg = Get-LnkTarget $f.FullName
                     $sg = Get-Signer $tg
-                    if ($tg -and (Test-DeadTarget '' $tg $sg)) {
+                    # ярлык на сценарий или на powershell/wscript - то же самое, что сценарий в автозапуске из реестра
+                    $cmd = ''; $risk = ''
+                    if ($tg) { $cmd = ('"' + $tg + '" ' + (Get-LnkArguments $f.FullName)).Trim(); $risk = Get-CommandRisk $cmd }
+                    if ($risk -eq 'BAD') {
+                        $flag++
+                        Add-Finding -Level BAD -Title "Ярлык в автозагрузке похож на вредоносный: $($f.Name) ($($d.T))" -Detail @("команда: $(Hide-Secrets $cmd)") -Fix $script:FixMoveFile -FixText 'убрать ярлык из автозагрузки (копия в backup)' -Data $data -Explicit -Manual 'если сам такого не настраивал - убрать по номеру и запустить полную проверку Defender'
+                    } elseif ($tg -and (Test-DeadTarget '' $tg $sg)) {
                         $flag++
                         Add-Finding -Level WARN -Title "Ярлык в автозагрузке ведёт на несуществующий файл: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать мёртвый ярлык (копия в backup)' -Data $data -Explicit:$script:Ctx.Differs
                     } elseif ($tg -and -not (Test-ValidSigned $sg) -and $sg -ne 'FILE NOT FOUND' -and (Test-UserWritablePath $tg)) {
                         $flag++
                         Add-Finding -Level WARN -Title "В автозагрузке неподписанная программа из пользовательской папки: $($f.Name) ($($d.T))" -Detail @("цель: $tg") -Fix $script:FixMoveFile -FixText 'убрать ярлык из автозагрузки (копия в backup)' -Data $data -Explicit
+                    } elseif ($risk -eq 'WARN') {
+                        $flag++
+                        Add-Finding -Level WARN -Title "Ярлык в автозагрузке запускает сценарий: $($f.Name) ($($d.T))" -Detail @("команда: $(Hide-Secrets $cmd)") -Fix $script:FixMoveFile -FixText 'убрать ярлык из автозагрузки (копия в backup)' -Data $data -Explicit -Manual 'если сам такого не настраивал - показать отчёт'
                     } else { $fine += "$($f.Name) -> $tg ($(Get-SignerText $sg)) [$($d.T)]" }
                 } elseif ($f.Extension -match '(?i)^\.(vbs|vbe|js|jse|wsf|hta|bat|cmd|ps1|scr|pif|com)$') {
                     $flag++
