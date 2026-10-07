@@ -119,6 +119,7 @@ $script:UpdCache = $null
 $script:RebootNeeded = $false
 $script:UserHives = @()
 $script:Programs = @()
+$script:ProcList = $null
 $script:Ctx = $null
 $script:HostsPath = ''
 if ($script:IsWin) { $script:HostsPath = Join-P $env:SystemRoot 'System32\drivers\etc\hosts' }
@@ -507,6 +508,26 @@ function Get-Programs {
 }
 function Test-Installed { param([string]$Rx) return (@($script:Programs | Where-Object { $_.Name -match $Rx -or $_.Publisher -match $Rx }).Count -gt 0) }
 function Get-InstalledNames { param([string]$Rx) return @($script:Programs | Where-Object { -not $_.Hidden -and $_.Name -match $Rx } | ForEach-Object { "$($_.Name) $($_.Version)".Trim() } | Sort-Object -Unique) }
+function Get-ProcList {
+    # запущенные программы с путём к своему файлу; список собирается один раз за проверку
+    if ($null -eq $script:ProcList) {
+        $list = @()
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+            $pp = ''
+            try { $pp = "$($p.Path)" } catch { }
+            if ($pp) { $list += [pscustomobject]@{ Name = "$($p.ProcessName)"; Id = [int]$p.Id; Path = $pp } }
+        }
+        $script:ProcList = $list
+    }
+    return $script:ProcList
+}
+function Get-RunningUnder {
+    # имена запущенных программ, чьи файлы лежат в этой папке (или это сам файл)
+    param([string]$Path)
+    $d = "$Path".TrimEnd('\')
+    if (-not (Test-FullPath $d) -or $d -match '[*?%]') { return @() }
+    return @(Get-ProcList | Where-Object { $_.Path -ieq $d -or $_.Path.StartsWith("$d\", [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.Name } | Sort-Object -Unique)
+}
 
 # ================================================================ 1. СИСТЕМА
 function Invoke-SystemChecks {
@@ -678,15 +699,18 @@ $script:FixPua = {
 }
 $script:FixExclusion = {
     param($f)
-    $v = $f.Data.Value
-    Add-BackupLine 'defender_exclusions_removed.tsv' "$($f.Data.Kind)`t$v"
-    switch ($f.Data.Kind) {
-        'Path' { Remove-MpPreference -ExclusionPath $v }
-        'Process' { Remove-MpPreference -ExclusionProcess $v }
-        'Extension' { Remove-MpPreference -ExclusionExtension $v }
-        'IpAddress' { Remove-MpPreference -ExclusionIpAddress $v }
+    $vals = @($f.Data.Values | Where-Object { $_ })
+    foreach ($v in $vals) {
+        Add-BackupLine 'defender_exclusions_removed.tsv' "$($f.Data.Kind)`t$v"
+        switch ($f.Data.Kind) {
+            'Path' { Remove-MpPreference -ExclusionPath $v }
+            'Process' { Remove-MpPreference -ExclusionProcess $v }
+            'Extension' { Remove-MpPreference -ExclusionExtension $v }
+            'IpAddress' { Remove-MpPreference -ExclusionIpAddress $v }
+        }
+        Add-Change 'defender exclusion removed' "$($f.Data.Kind)`t$v"
     }
-    Add-Change 'defender exclusion removed' "$($f.Data.Kind)`t$v"
+    if ($vals.Count -gt 1) { return "исключений убрано: $($vals.Count)" }
     return 'исключение убрано'
 }
 $script:FixQuickScan = {
@@ -723,6 +747,27 @@ $script:FixSmb1 = {
     Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -Confirm:$false
     Add-Change 'smb1 disabled' 'Set-SmbServerConfiguration -EnableSMB1Protocol false'
     return 'SMB1 выключен'
+}
+
+# папки, которые в исключения антивируса предлагают добавить сами инструменты разработки (так быстрее идёт сборка)
+$script:DevExclusionRx = '(?i)(\\\.(gradle|android|m2|cargo|rustup|nuget|pub-cache|konan)|\\AppData\\Local\\Android\\Sdk|\\AppData\\Local\\Google\\AndroidStudio[^\\]*|\\AppData\\(Local|Roaming)\\JetBrains\\[^\\]+|\\node_modules)(\\|$)'
+function Test-DevExclusion { param([string]$Path) return ("$Path" -match $script:DevExclusionRx) }
+function Get-ExclusionGroups {
+    # исключение внутри уже исключённой папки ничего не добавляет: такие пути идут одним пунктом вместе с этой папкой
+    param([string[]]$Paths)
+    $all = @($Paths | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Raw = "$_"; Norm = "$_".TrimEnd('\') } })
+    $groups = @()
+    foreach ($p in $all) {
+        $inside = $false
+        foreach ($q in $all) {
+            if ($q.Norm.Length -lt $p.Norm.Length -and $q.Norm -notmatch '[*?%]' -and $p.Norm.StartsWith("$($q.Norm)\", [StringComparison]::OrdinalIgnoreCase)) { $inside = $true; break }
+        }
+        if ($inside) { continue }
+        $inner = @()
+        if ($p.Norm -notmatch '[*?%]') { $inner = @($all | Where-Object { $_.Norm.Length -gt $p.Norm.Length -and $_.Norm.StartsWith("$($p.Norm)\", [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.Raw }) }
+        $groups += [pscustomobject]@{ Top = $p.Raw; Inner = $inner }
+    }
+    return $groups
 }
 
 function Invoke-ProtectionChecks {
@@ -801,17 +846,31 @@ function Invoke-ProtectionChecks {
         try { $pref = Get-MpPreference -ErrorAction Stop } catch { }
         if ($null -eq $pref) { return }
         $n = 0
-        $kinds = @(@{ K = 'Path'; V = $pref.ExclusionPath; T = 'папка/файл' }, @{ K = 'Process'; V = $pref.ExclusionProcess; T = 'процесс' }, @{ K = 'Extension'; V = $pref.ExclusionExtension; T = 'расширение' }, @{ K = 'IpAddress'; V = $pref.ExclusionIpAddress; T = 'адрес' })
+        $fixText = 'убрать исключение (файлы не трогаются; Defender может потом сам удалить то, что там найдёт; вернуть: Add-MpPreference, список в backup)'
+        foreach ($g in @(Get-ExclusionGroups @($pref.ExclusionPath))) {
+            $n++
+            $v = "$($g.Top)"
+            $data = @{ Kind = 'Path'; Values = (@($g.Top) + @($g.Inner)) }
+            $more = @()
+            if ($g.Inner.Count) { $more += "внутри отдельно исключены (уберутся вместе с ней): $($g.Inner -join '; ')" }
+            if ($v -notmatch '[*?%]' -and (Test-FullPath $v) -and -not (Test-DriveMissing $v) -and -not (Test-PathSafe $v)) {
+                Add-Finding -Level WARN -Title "Исключение Defender на несуществующий путь: $v" -Detail $more -Fix $script:FixExclusion -FixText 'убрать исключение' -Data $data
+                continue
+            }
+            $run = @(Get-RunningUnder $v)
+            if ($run.Count) { $more += "сейчас оттуда запущено: $($run -join ', ') - без исключения Defender может остановить эти программы" }
+            if (Test-DevExclusion $v) {
+                Add-Finding -Level WARN -Title "Исключение Defender для инструментов разработки: $v" -Detail (@('такие папки в исключения предлагают добавить сами среды разработки, чтобы сборка шла быстрее; антивирус туда не смотрит') + $more) `
+                    -Fix $script:FixExclusion -FixText 'убрать исключение (сборка проектов может замедлиться; вернуть: Add-MpPreference, список в backup)' -Data $data -Explicit -Manual 'если разработкой на этом компьютере не занимаются - убрать по номеру'
+            } else {
+                Add-Finding -Level BAD -Title "Исключение Defender (папка/файл): $v" -Detail (@('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') + $more) -Fix $script:FixExclusion -FixText $fixText -Data $data
+            }
+        }
+        $kinds = @(@{ K = 'Process'; V = $pref.ExclusionProcess; T = 'процесс' }, @{ K = 'Extension'; V = $pref.ExclusionExtension; T = 'расширение' }, @{ K = 'IpAddress'; V = $pref.ExclusionIpAddress; T = 'адрес' })
         foreach ($k in $kinds) {
             foreach ($v in @($k.V | Where-Object { $_ })) {
                 $n++
-                $dead = $false
-                if ($k.K -eq 'Path' -and "$v" -notmatch '[*?%]' -and (Test-FullPath "$v") -and -not (Test-DriveMissing "$v") -and -not (Test-PathSafe "$v")) { $dead = $true }
-                if ($dead) {
-                    Add-Finding -Level WARN -Title "Исключение Defender на несуществующий путь: $v" -Fix $script:FixExclusion -FixText 'убрать исключение' -Data @{ Kind = $k.K; Value = "$v" }
-                } else {
-                    Add-Finding -Level BAD -Title "Исключение Defender ($($k.T)): $v" -Detail @('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') -Fix $script:FixExclusion -FixText 'убрать исключение (файлы не трогаются; Defender может потом сам удалить то, что там найдёт; вернуть: Add-MpPreference, список в backup)' -Data @{ Kind = $k.K; Value = "$v" }
-                }
+                Add-Finding -Level BAD -Title "Исключение Defender ($($k.T)): $v" -Detail @('антивирус туда не смотрит - так прячутся взломщики программ и вирусы') -Fix $script:FixExclusion -FixText $fixText -Data @{ Kind = $k.K; Values = @("$v") }
             }
         }
         if ($n -eq 0) { Add-Finding -Level OK -Title 'Исключений Defender нет' }
@@ -1912,6 +1971,7 @@ function Invoke-AllChecks {
     $script:Findings = New-Object System.Collections.ArrayList
     if ($script:DemoMode) { Invoke-DemoChecks; return }
     $script:Ctx = Get-RunContext
+    $script:ProcList = $null
     $script:UserHives = @(Get-UserHives)
     $script:Programs = @(Get-Programs)
     Invoke-SystemChecks

@@ -110,5 +110,20 @@ Set-Content (Join-Path $d 'service') 'x'; Set-Content (Join-Path $d 'tool.exe') 
 T 'exe noext' (Get-ExePath "$d/service --run now") "$d/service"
 T 'exe implied .exe' (Get-ExePath "$d/tool /x") "$d/tool.exe"
 T 'exe fallback' (Get-ExePath 'C:\Nope dir\svc --run') 'C:\Nope'
+# Defender exclusions
+T 'dev excl gradle' (Test-DevExclusion 'C:\Users\a\.gradle') 'True'
+T 'dev excl sdk' (Test-DevExclusion 'C:\Users\a\AppData\Local\Android\Sdk') 'True'
+T 'dev excl ide caches' (Test-DevExclusion 'C:\Users\a\AppData\Local\Google\AndroidStudio2024.1') 'True'
+T 'dev excl node_modules' (Test-DevExclusion 'D:\work\app\node_modules') 'True'
+T 'dev excl lookalike' (Test-DevExclusion 'C:\Users\a\.gradlex') 'False'
+T 'dev excl desktop folder' (Test-DevExclusion 'C:\Users\a\Desktop\tool') 'False'
+T 'dev excl whole vendor folder' (Test-DevExclusion 'C:\Users\a\AppData\Local\JetBrains') 'False'
+$g = @(Get-ExclusionGroups @('C:\A\', 'C:\A\bin\x.exe', 'c:\a\y.exe', 'C:\AB', 'D:\*\q', 'D:\*\q\r'))
+T 'excl groups' (($g | ForEach-Object { "$($_.Top)=$($_.Inner.Count)" }) -join ',') 'C:\A\=2,C:\AB=0,D:\*\q=0,D:\*\q\r=0'
+T 'excl inner keeps the stored spelling' ($g[0].Inner -join ',') 'C:\A\bin\x.exe,c:\a\y.exe'
+$script:ProcList = @([pscustomobject]@{ Name = 'tool'; Id = 1; Path = 'C:\A\bin\tool.exe' }, [pscustomobject]@{ Name = 'other'; Id = 2; Path = 'C:\AB\other.exe' })
+T 'running under folder' ((Get-RunningUnder 'C:\A\') -join ',') 'tool'
+T 'running under file' ((Get-RunningUnder 'C:\AB\other.exe') -join ',') 'other'
+T 'running under wildcard' (@(Get-RunningUnder 'C:\*').Count) 0
 "FAILED: $fail"
 if ($fail) { exit 1 }

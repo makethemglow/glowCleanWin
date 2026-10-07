@@ -120,10 +120,12 @@ $global:FakeFiles['C:\Windows\System32\svchost.exe'] = 'Valid|Microsoft Windows 
 $global:FakeFiles['C:\Program Files\Vendor\svc.exe'] = 'Valid|Vendor Inc'
 $global:FakeFiles['C:\ProgramData\x\unsigned.exe'] = 'NotSigned'
 $global:FakeFiles['C:\Crack'] = 'DIR'
+$global:FakeFiles['C:\Crack\bin\patch.exe'] = 'NotSigned'
+$global:FakeFiles['C:\Users\Tester\.gradle'] = 'DIR'
 class FakeSigCert { [string]$N; [string] GetNameInfo([object]$a, [object]$b) { return $this.N } }
 function Get-AuthenticodeSignature { [CmdletBinding()] param($LiteralPath) $v = $global:FakeFiles["$LiteralPath"] -split '\|'; $c = $null; if ($v.Count -gt 1) { $c = [FakeSigCert]::new(); $c.N = $v[1] }; return [pscustomobject]@{ Status = $v[0]; SignerCertificate = $c } }
 
-$global:S = @{ Realtime = $Clean.IsPresent; SigDate = (Get-Date).AddDays(-40); Pua = 0; ExPath = @('C:\Crack', 'C:\Gone\folder'); Active = $true; FwOff = @('Public'); Smb1 = $true; GuestOn = $true; Appx = @('Microsoft.BingNews', 'king.com.CandyCrushSaga', 'Microsoft.WindowsCalculator'); Tasks = @() }
+$global:S = @{ Realtime = $Clean.IsPresent; SigDate = (Get-Date).AddDays(-40); Pua = 0; ExPath = @('C:\Crack', 'C:\Crack\bin\patch.exe', 'C:\Users\Tester\.gradle', 'C:\Gone\folder'); Active = $true; FwOff = @('Public'); Smb1 = $true; GuestOn = $true; Appx = @('Microsoft.BingNews', 'king.com.CandyCrushSaga', 'Microsoft.WindowsCalculator'); Tasks = @() }
 if ($Clean) { $global:S.SigDate = Get-Date; $global:S.Pua = 1; $global:S.ExPath = @(); $global:S.Active = $false; $global:S.FwOff = @(); $global:S.Smb1 = $false; $global:S.GuestOn = $false; $global:S.Appx = @('Microsoft.WindowsCalculator') }
 function NewTask($p, $n, $exe, $arg, $state = 'Ready') { [pscustomobject]@{ TaskPath = $p; TaskName = $n; State = $state; Author = 'x'; Actions = @([pscustomobject]@{ Execute = $exe; Arguments = $arg }) } }
 $global:S.Tasks += NewTask '\Microsoft\Windows\Customer Experience Improvement Program\' 'Consolidator' '%SystemRoot%\System32\svchost.exe' ''
@@ -182,6 +184,11 @@ function Get-DnsClientServerAddress { [CmdletBinding()] param() [pscustomobject]
 function Get-LocalUser { [CmdletBinding()] param() [pscustomobject]@{ Name = 'Tester'; Enabled = $true; LastLogon = (Get-Date); SID = "$sid" }; [pscustomobject]@{ Name = 'Guest'; Enabled = $global:S.GuestOn; LastLogon = $null; SID = 'S-1-5-21-1-2-3-501' } }
 function Disable-LocalUser { [CmdletBinding()] param($SID) $global:S.GuestOn = $false }
 function Get-LocalGroupMember { [CmdletBinding()] param($SID) [pscustomobject]@{ Name = 'TEST-PC\Tester' } }
+function Get-Process { [CmdletBinding()] param($Name, $Id)
+    $all = @([pscustomobject]@{ ProcessName = 'explorer'; Id = 100; Path = 'C:\Windows\explorer.exe' })
+    if (-not $Clean) { $all += [pscustomobject]@{ ProcessName = 'patch'; Id = 200; Path = 'C:\Crack\bin\patch.exe' } }
+    foreach ($p in $all) { if ($Name -and $p.ProcessName -ne $Name) { continue }; if ($Id -and $p.Id -ne $Id) { continue }; $p }
+}
 function Get-Service { [CmdletBinding()] param($Name) if (-not $Clean) { [pscustomobject]@{ Name = 'WinRM'; DisplayName = 'Windows Remote Management'; Status = 'Running' } } }
 function Get-AppxPackage { [CmdletBinding()] param($User) foreach ($a in $global:S.Appx) { [pscustomobject]@{ Name = $a; PackageFullName = "${a}_1.0_x64__abc" } } }
 function Remove-AppxPackage { [CmdletBinding()] param($Package, $User) $n = $Package -replace '_1\.0_x64__abc$', ''; $global:S.Appx = @($global:S.Appx | Where-Object { $_ -ne $n }) }
