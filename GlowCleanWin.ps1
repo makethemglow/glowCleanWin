@@ -2330,6 +2330,7 @@ function Invoke-Main {
     }
     Out-Line ''
     Out-Line "  Отчёт:   $script:ReportFile" 'Cyan'
+    Out-Line '           в нём есть имя компьютера, имена учётных записей и список программ: показывай тому, кому доверяешь, в открытый доступ не выкладывай' 'Gray'
     if (Test-PathSafe $script:BackupDir) { Out-Line "  Копии:   $script:BackupDir" 'Cyan' }
     if (Test-PathSafe $script:JournalFile) { Out-Line "  Журнал:  $script:JournalFile" 'Cyan' }
     Save-Report
