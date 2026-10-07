@@ -35,6 +35,7 @@ T 'native Reg::' (ConvertTo-NativeRegPath 'Registry::HKEY_USERS\S-1\X') 'HKEY_US
 T 'signer text' (Get-SignerText 'Valid | Valve Corp.') 'подпись: Valve Corp.'
 T 'ms signed' (Test-MsSigned 'Valid | Microsoft Windows') 'True'
 T 'promo king' (Test-NameLike 'king.com.CandyCrushSaga' $script:PromoThird) 'True'
+T 'promo devhome is a tool, not an ad' (Test-NameLike 'Microsoft.Windows.DevHome' ($script:PromoMs + $script:PromoThird)) 'False'
 T 'promo calc' (Test-NameLike 'Microsoft.WindowsCalculator' ($script:PromoMs + $script:PromoThird)) 'False'
 T 'promo MSTeams (new teams kept)' (Test-NameLike 'MSTeams' ($script:PromoMs + $script:PromoThird)) 'False'
 

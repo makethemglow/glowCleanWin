@@ -688,6 +688,9 @@ function Invoke-SystemChecks {
                 Add-Finding -Level WARN -Title "SSD заметно изношен: $name" -Detail $det -Manual 'следить за износом, держать свежую резервную копию'
             } elseif ($r -and ($r.ReadErrorsUncorrected -gt 0 -or $r.WriteErrorsUncorrected -gt 0)) {
                 Add-Finding -Level WARN -Title "У диска есть неисправленные ошибки: $name" -Detail $det -Manual 'проверить диск в CrystalDiskInfo, держать резервную копию'
+            } elseif ("$($d.BusType)" -eq 'USB' -and $det.Count -eq 0) {
+                # флешка всегда отвечает "Healthy" и больше ничего о себе не сообщает: зелёная строка тут ничего бы не значила
+                Add-Finding -Level INFO -Title "Съёмный накопитель: $name - сведений о его здоровье Windows не получает"
             } else {
                 Add-Finding -Level OK -Title "Диск здоров: $name" -Detail $det
             }
@@ -1870,6 +1873,11 @@ function Invoke-AutorunChecks {
 
 # ================================================================ 7. УЧЁТНЫЕ ЗАПИСИ И УДАЛЁННЫЙ ДОСТУП
 $script:RemoteToolsRx = '(?i)(AnyDesk|TeamViewer|RustDesk|Ammyy|Remote Utilities|Remote Manipulator|RMS (Host|Viewer|Удал)|LiteManager|Radmin|UltraVNC|TightVNC|RealVNC|VNC Server|TigerVNC|Supremo|AeroAdmin|ScreenConnect|ConnectWise|LogMeIn|GoToAssist|GoTo Resolve|GoToMyPC|Splashtop|\bAtera|NetSupport|Getscreen|RuDesktop|DWAgent|DWService|MeshAgent|Mesh Agent|Chrome Remote Desktop|Удаленный рабочий стол Chrome|Parsec|HopToDesk|Iperius Remote|Zoho Assist|UltraViewer|NoMachine|AweSun|\bToDesk|SimpleHelp|Action1|Tactical RMM|ZeroTier|Tailscale|Hamachi|Ассистент)'
+# учётные записи, которые программы заводят сами для себя: без пояснения они выглядят как чужой пользователь
+$script:ServiceAccounts = @(
+    @{ Rx = '(?i)^itch-player-'; T = 'такие заводит приложение itch, чтобы запускать игры в песочнице' },
+    @{ Rx = '(?i)^CodexSandbox'; T = 'такие заводит Codex (OpenAI), чтобы запускать команды в песочнице' }
+)
 $script:FixDisableUser = {
     param($f)
     Disable-LocalUser -SID $f.Data.Sid
@@ -1886,7 +1894,9 @@ function Invoke-AccountChecks {
         foreach ($u in $users) {
             if (-not $u.Enabled) { continue }
             $ll = 'никогда'; if ($u.LastLogon) { $ll = $u.LastLogon.ToString('dd.MM.yyyy') }
-            $det += "$($u.Name) (последний вход: $ll)"
+            $note = ''
+            foreach ($sa in $script:ServiceAccounts) { if ("$($u.Name)" -match $sa.Rx) { $note = " - $($sa.T)"; break } }
+            $det += "$($u.Name) (последний вход: $ll)$note"
             if ("$($u.SID)" -match '-501$') { Add-Finding -Level WARN -Title "Включена учётная запись Гость ($($u.Name))" -Fix $script:FixDisableUser -FixText 'отключить Гостя' -Data @{ Sid = "$($u.SID)"; Name = "$($u.Name)" } }
             if ("$($u.SID)" -match '-500$') { Add-Finding -Level WARN -Title "Включена встроенная учётная запись Администратор ($($u.Name))" -Detail @('у неё нет запроса UAC; её часто включают активаторы и "помощники"') -Fix $script:FixDisableUser -FixText 'отключить встроенного Администратора' -Data @{ Sid = "$($u.SID)"; Name = "$($u.Name)" } -Explicit -Manual 'убедиться, что есть другая учётная запись с правами администратора, и отключить по номеру' }
         }
@@ -1962,7 +1972,7 @@ function Invoke-ProgramChecks {
 # рекламные заглушки самой Microsoft: данных пользователя в них нет
 $script:PromoMs = @(
     'Microsoft.BingNews', 'Microsoft.BingSearch', 'Microsoft.Copilot', 'Microsoft.MicrosoftOfficeHub', 'Microsoft.PowerAutomateDesktop',
-    'Microsoft.Windows.DevHome', 'Microsoft.WindowsFeedbackHub', 'Microsoft.Edge.GameAssist', 'Microsoft.549981C3F5F10', 'Microsoft.MixedReality.Portal',
+    'Microsoft.WindowsFeedbackHub', 'Microsoft.Edge.GameAssist', 'Microsoft.549981C3F5F10', 'Microsoft.MixedReality.Portal',
     'Microsoft.Microsoft3DViewer', 'Microsoft.3DBuilder', 'Microsoft.Print3D', 'Microsoft.Getstarted', 'Microsoft.Messaging', 'Microsoft.OneConnect', 'Microsoft.SkypeApp',
     'Microsoft.StartExperiencesApp', 'Microsoft.MicrosoftJournal', 'MicrosoftCorporationII.MicrosoftFamily'
 )
