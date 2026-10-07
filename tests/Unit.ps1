@@ -159,5 +159,14 @@ $old = $req.CreateSelfSigned([DateTimeOffset]::Now.AddYears(-3), [DateTimeOffset
 $lines = @(Get-CertLines ([pscustomobject]@{ Cert = $old; Store = 'Root'; Where = @('компьютер') }))
 T 'cert lines expired' ($lines[3] -match '^действует с \d\d\.\d\d\.\d{4} по \d\d\.\d\d\.\d{4} - СРОК ИСТЁК; отпечаток [0-9A-F]{40}$') 'True'
 T 'cert lines valid' ((Get-CertLines ([pscustomobject]@{ Cert = $cert; Store = 'Root'; Where = @('компьютер') }))[3] -match 'ИСТЁК') 'False'
+# who listens on a local port
+$script:ProcList = @([pscustomobject]@{ Name = 'tool'; Id = 11; Path = 'C:\A\bin\tool.exe' })
+function Get-NetTCPConnection { [CmdletBinding()] param($State) [pscustomobject]@{ LocalPort = 8080; OwningProcess = 11 }; [pscustomobject]@{ LocalPort = 9090; OwningProcess = 77 } }
+T 'listener known process' (Get-PortListener 8080) 'tool (C:\A\bin\tool.exe)'
+T 'listener process without a path' (Get-PortListener 9090) 'процесс с номером 77'
+T 'listener nobody' ('[' + (Get-PortListener 1234) + ']') '[]'
+T 'listener nobody is not unknown' ($null -ne (Get-PortListener 1234)) 'True'
+function Get-NetTCPConnection { [CmdletBinding()] param($State) throw 'no such cmdlet here' }
+T 'listener unknown' ($null -eq (Get-PortListener 8080)) 'True'
 "FAILED: $fail"
 if ($fail) { exit 1 }

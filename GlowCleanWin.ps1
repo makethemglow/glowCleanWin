@@ -574,6 +574,20 @@ function Get-ProcList {
     }
     return $script:ProcList
 }
+function Get-PortListener {
+    # какая программа слушает локальный порт: 'имя (файл)'; '' - никто; $null - узнать не удалось
+    param([int]$Port)
+    $all = $null
+    try { $all = @(Get-NetTCPConnection -State Listen -ErrorAction Stop) } catch { return $null }
+    $ids = @($all | Where-Object { [int]$_.LocalPort -eq $Port } | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+    if ($ids.Count -eq 0) { return '' }
+    $out = @()
+    foreach ($id in $ids) {
+        $p = @(Get-ProcList | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+        if ($p) { $out += "$($p.Name) ($($p.Path))" } else { $out += "процесс с номером $id" }
+    }
+    return ($out -join ', ')
+}
 function Get-RunningUnder {
     # имена запущенных программ, чьи файлы лежат в этой папке (или это сам файл)
     param([string]$Path)
@@ -1550,7 +1564,16 @@ function Invoke-NetworkChecks {
             if ($on) {
                 $any = $true
                 $local = ("$srv" -match '(?i)(^|=|//)(127\.0\.0\.1|localhost|\[::1\])[:;]')
-                if ($local) { Add-Finding -Level WARN -Title "Включён локальный прокси ($($h.Name)): $srv" -Detail @('обычно это VPN-клиент или антивирус на этом же компьютере') -Fix $script:FixProxy -FixText 'выключить системный прокси' -Data @{ Key = $k; Pac = $false; Proxy = $true } -Explicit }
+                if ($local) {
+                    $det = @('обычно это VPN-клиент или антивирус на этом же компьютере')
+                    if ("$srv" -match '(?i)(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})') {
+                        $port = [int]$matches[1]
+                        $who = Get-PortListener $port
+                        if ($who) { $det += "порт $port сейчас слушает: $who" }
+                        elseif ($null -ne $who) { $det += "порт $port сейчас никто не слушает: программа прокси не запущена; пока это так, браузеры с системным прокси сайты не откроют" }
+                    }
+                    Add-Finding -Level WARN -Title "Включён локальный прокси ($($h.Name)): $srv" -Detail $det -Fix $script:FixProxy -FixText 'выключить системный прокси' -Data @{ Key = $k; Pac = $false; Proxy = $true } -Explicit
+                }
                 else { Add-Finding -Level WARN -Title "Трафик браузеров идёт через прокси ($($h.Name)): $srv" -Fix $script:FixProxy -FixText 'выключить системный прокси' -Data @{ Key = $k; Pac = $false; Proxy = $true } -Manual 'если прокси не настраивал сам - выключить' }
             }
         }

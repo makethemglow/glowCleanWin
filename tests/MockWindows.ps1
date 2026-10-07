@@ -203,9 +203,10 @@ function Disable-LocalUser { [CmdletBinding()] param($SID) $global:S.GuestOn = $
 function Get-LocalGroupMember { [CmdletBinding()] param($SID) [pscustomobject]@{ Name = 'TEST-PC\Tester' } }
 function Get-Process { [CmdletBinding()] param($Name, $Id)
     $all = @([pscustomobject]@{ ProcessName = 'explorer'; Id = 100; Path = 'C:\Windows\explorer.exe' })
-    if (-not $Clean) { $all += [pscustomobject]@{ ProcessName = 'patch'; Id = 200; Path = 'C:\Crack\bin\patch.exe' } }
+    if (-not $Clean) { $all += [pscustomobject]@{ ProcessName = 'patch'; Id = 200; Path = 'C:\Crack\bin\patch.exe' }; $all += [pscustomobject]@{ ProcessName = 'proxytool'; Id = 300; Path = 'C:\Tools\proxytool.exe' } }
     foreach ($p in $all) { if ($Name -and $p.ProcessName -ne $Name) { continue }; if ($Id -and $p.Id -ne $Id) { continue }; $p }
 }
+function Get-NetTCPConnection { [CmdletBinding()] param($State) [pscustomobject]@{ LocalPort = 135; OwningProcess = 4 }; if (-not $Clean) { [pscustomobject]@{ LocalPort = 8080; OwningProcess = 300 } } }
 function Get-Service { [CmdletBinding()] param($Name) if (-not $Clean) { [pscustomobject]@{ Name = 'WinRM'; DisplayName = 'Windows Remote Management'; Status = 'Running' } } }
 function Get-AppxPackage { [CmdletBinding()] param($User) foreach ($a in $global:S.Appx) { [pscustomobject]@{ Name = $a; PackageFullName = "${a}_1.0_x64__abc" } } }
 function Remove-AppxPackage { [CmdletBinding()] param($Package, $User) $n = $Package -replace '_1\.0_x64__abc$', ''; $global:S.Appx = @($global:S.Appx | Where-Object { $_ -ne $n }) }
